@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+.env
+
+# Keep folders, ignore their contents
+pdf/*
+!pdf/.gitkeep
+
+output/*
+!output/.gitkeep
