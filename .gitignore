@@ -10,3 +10,9 @@ pdf/*
 
 output/*
 !output/.gitkeep
+
+md_ref/
+.claude/
+compare.py
+log.md
+plan.md

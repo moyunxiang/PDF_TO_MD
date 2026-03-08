@@ -1,14 +1,26 @@
-.PHONY: convert convert-one compare clean setup postprocess
+.PHONY: run convert convert-one split split-pages compare clean setup postprocess
 
 VENV := .venv/bin/python
 
-# Convert PDFs — interactive menu for mode/model selection
+# Main entry point (recommended)
+run:
+	$(VENV) main.py
+
+# Convert all PDFs — interactive menu
 convert:
-	$(VENV) convert.py
+	$(VENV) main.py convert
 
 # Convert a single PDF: make convert-one F=1.review-const.pdf
 convert-one:
-	$(VENV) convert.py $(F)
+	$(VENV) main.py convert $(F)
+
+# Split a large PDF by chapters: make split F=textbook.pdf
+split:
+	$(VENV) main.py split $(F)
+
+# Split by page count: make split-pages F=textbook.pdf P=50
+split-pages:
+	$(VENV) main.py split $(F) --pages $(P)
 
 # Re-run post-processing only (no re-conversion, mode A only)
 postprocess:
@@ -16,7 +28,7 @@ postprocess:
 
 # Compare output/ vs md_ref/
 compare:
-	$(VENV) compare.py
+	$(VENV) main.py compare
 
 # Clean output
 clean:
