@@ -460,17 +460,71 @@ def print_summary(results: list[dict], total_elapsed: float):
     console.print(table)
 
 
+
+# ── PDF Discovery (supports split subdirectories) ────────────────
+
+def find_pdfs(pdf_dir: Path) -> list[tuple[Path, Path]]:
+    """Find all PDFs to convert, with their output directories.
+
+    Returns list of (pdf_path, output_dir) tuples.
+
+    Logic:
+    - pdf/X.pdf → output to markdown/ (becomes markdown/X/X.md)
+    - pdf/Y/Z.pdf → output to markdown/Y/ (becomes markdown/Y/Z/Z.md)
+    - If pdf/X.pdf has a matching pdf/X/ with PDFs, skip pdf/X.pdf (already split)
+    """
+    results = []
+
+    # Top-level PDFs
+    for pdf in sorted(pdf_dir.glob("*.pdf")):
+        sub_dir = pdf_dir / pdf.stem
+        if sub_dir.is_dir() and list(sub_dir.glob("*.pdf")):
+            # This PDF has been split — skip it, convert parts instead
+            continue
+        results.append((pdf, MARKDOWN_DIR))
+
+    # Subdirectory PDFs (from split)
+    for sub in sorted(pdf_dir.iterdir()):
+        if sub.is_dir() and not sub.name.startswith('.'):
+            sub_pdfs = sorted(sub.glob("*.pdf"))
+            if sub_pdfs:
+                out = MARKDOWN_DIR / sub.name
+                for pdf in sub_pdfs:
+                    results.append((pdf, out))
+
+    return results
+
+
+def get_output_dir(pdf_path: Path) -> Path:
+    """Determine the markdown output directory for a given PDF.
+
+    - pdf/X.pdf → markdown/
+    - pdf/Y/Z.pdf → markdown/Y/
+    """
+    try:
+        rel = pdf_path.relative_to(PDF_DIR)
+        parent = rel.parent
+        if parent != Path('.'):
+            return MARKDOWN_DIR / parent
+    except ValueError:
+        pass
+    return MARKDOWN_DIR
+
+
 # ── Batch Conversion ─────────────────────────────────────────────
 
-def convert_all(pdf_dir: Path, output_dir: Path, disable_ocr: bool = True):
-    """Convert all PDFs in pdf_dir. Pure marker conversion, no API."""
-    pdfs = sorted(pdf_dir.glob("*.pdf"))
-    if not pdfs:
+def convert_all(pdf_dir: Path, output_dir: Path = None, disable_ocr: bool = True):
+    """Convert all PDFs in pdf_dir (including split subdirectories).
+
+    Uses find_pdfs() to discover PDFs and determine output directories.
+    If pdf/X/ exists with PDFs, pdf/X.pdf is skipped (already split).
+    """
+    pdf_items = find_pdfs(pdf_dir)
+    if not pdf_items:
         console.print(f"[red]No PDFs found in {pdf_dir}/[/red]")
         return
 
-    total_size = sum(p.stat().st_size for p in pdfs)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    total_size = sum(p.stat().st_size for p, _ in pdf_items)
 
     results = []
     total_start = time.time()
@@ -486,14 +540,15 @@ def convert_all(pdf_dir: Path, output_dir: Path, disable_ocr: bool = True):
         transient=False,
     ) as progress:
         task = progress.add_task(
-            f"[bold]Converting {len(pdfs)} PDFs[/bold] [dim]({_format_size(total_size)})[/dim]",
-            total=len(pdfs),
+            f"[bold]Converting {len(pdf_items)} PDFs[/bold] [dim]({_format_size(total_size)})[/dim]",
+            total=len(pdf_items),
         )
 
-        for i, pdf in enumerate(pdfs, 1):
+        for i, (pdf, out_dir) in enumerate(pdf_items, 1):
             try:
+                out_dir.mkdir(parents=True, exist_ok=True)
                 progress.stop()
-                stats = convert_single(pdf, output_dir, index=i, total=len(pdfs), disable_ocr=disable_ocr)
+                stats = convert_single(pdf, out_dir, index=i, total=len(pdf_items), disable_ocr=disable_ocr)
                 results.append(stats)
                 progress.start()
                 progress.advance(task)

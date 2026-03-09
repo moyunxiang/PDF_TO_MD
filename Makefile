@@ -6,7 +6,7 @@ VENV := .venv/bin/python
 run:
 	$(VENV) main.py
 
-# Convert all PDFs (pure marker, no API)
+# Convert all PDFs (pure marker, no API) — auto-detects split subdirectories
 convert:
 	$(VENV) main.py convert
 
@@ -18,7 +18,7 @@ convert-one:
 enhance:
 	$(VENV) main.py enhance
 
-# Split a large PDF: make split F=textbook.pdf
+# Split a large PDF (no conversion): make split F=textbook.pdf → pdf/textbook/
 split:
 	$(VENV) main.py split $(F)
 
@@ -28,7 +28,7 @@ split-pages:
 
 # Re-run post-processing only (no re-conversion)
 postprocess:
-	$(VENV) -c "from convert import postprocess_file; from pathlib import Path; [postprocess_file(f) or print(f'  ✓ {f}') for f in sorted(Path('markdown').glob('*/*.md'))]"
+	$(VENV) -c "from convert import postprocess_file; from pathlib import Path; [postprocess_file(f) or print(f'  ✓ {f}') for f in sorted(Path('markdown').glob('**/*.md'))]"
 
 # Clean output
 clean:
