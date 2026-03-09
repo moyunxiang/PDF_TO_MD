@@ -3,12 +3,15 @@
 API enhancement module — standalone step to enhance Markdown via LLM (OpenRouter).
 
 Can be used independently after conversion:
-  1. Convert PDFs → output/ (pure marker)
-  2. Enhance output/ MDs → output/*_enhanced/ (this module)
+  1. Convert PDFs → markdown/ (pure marker)
+  2. Enhance markdown/ MDs → enhanced/ (this module)
+
+Also supports manually placed .md files in markdown/.
 """
 
 import os
 import re
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -20,7 +23,8 @@ from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, 
 
 console = Console()
 
-OUTPUT_DIR = Path("output")
+MARKDOWN_DIR = Path("markdown")
+ENHANCED_DIR = Path("enhanced")
 
 # ── Models ───────────────────────────────────────────────────────
 
@@ -77,7 +81,7 @@ def empty_usage() -> dict:
 
 def estimate_tokens(text: str, mode: str = "B") -> dict:
     """Estimate token usage from actual MD content.
-    
+
     Returns dict with prompt_tokens, completion_tokens, total_tokens estimates.
     Much more accurate than page-count estimation.
     """
@@ -106,53 +110,10 @@ def _format_size(nbytes: int) -> str:
         return f"{nbytes / (1024 * 1024):.1f} MB"
 
 
-# ── Scan MDs ─────────────────────────────────────────────────────
+# ── Scan MD Sources ──────────────────────────────────────────────
 
-def scan_md_dirs() -> list[dict]:
-    """Scan output/ for directories containing MD files.
-    
-    Returns list of {dir, name, md_files, total_lines, total_size, est_tokens_b, est_tokens_c}.
-    Skips *_enhanced/ directories.
-    """
-    results = []
-    if not OUTPUT_DIR.exists():
-        return results
-
-    for d in sorted(OUTPUT_DIR.iterdir()):
-        if not d.is_dir():
-            continue
-        if d.name.startswith(".") or d.name.endswith("_enhanced"):
-            continue
-
-        md_files = sorted(d.glob("*.md"))
-        if not md_files:
-            continue
-
-        total_lines = 0
-        total_size = 0
-        total_chars = 0
-        for md in md_files:
-            text = md.read_text(encoding="utf-8")
-            total_lines += len(text.splitlines())
-            total_size += md.stat().st_size
-            total_chars += len(text)
-
-        results.append({
-            "dir": d,
-            "name": d.name,
-            "md_files": md_files,
-            "total_lines": total_lines,
-            "total_size": total_size,
-            "est_tokens_b": estimate_tokens("x" * total_chars, "B")["total_tokens"],
-            "est_tokens_c": estimate_tokens("x" * total_chars, "C")["total_tokens"],
-        })
-
-    return results
-
-
-def scan_single_dir(md_dir: Path) -> dict:
-    """Scan a single directory for MD files. Returns stats dict."""
-    md_files = sorted(md_dir.glob("*.md"))
+def _scan_one(md_files: list[Path], name: str, path: Path, source_type: str) -> dict:
+    """Compute stats for a list of MD files."""
     total_lines = 0
     total_size = 0
     total_chars = 0
@@ -163,14 +124,52 @@ def scan_single_dir(md_dir: Path) -> dict:
         total_chars += len(text)
 
     return {
-        "dir": md_dir,
-        "name": md_dir.name,
+        "type": source_type,      # "dir" or "file"
+        "name": name,
+        "path": path,
         "md_files": md_files,
         "total_lines": total_lines,
         "total_size": total_size,
         "est_tokens_b": estimate_tokens("x" * total_chars, "B")["total_tokens"],
         "est_tokens_c": estimate_tokens("x" * total_chars, "C")["total_tokens"],
     }
+
+
+def scan_md_sources() -> list[dict]:
+    """Scan markdown/ for directories and loose .md files.
+
+    Detects two formats:
+      - markdown/abc/  (directory with .md files inside) → type="dir"
+      - markdown/abc.md (single .md file)                → type="file"
+
+    Returns list of source dicts sorted by name.
+    """
+    results = []
+    if not MARKDOWN_DIR.exists():
+        return results
+
+    for item in sorted(MARKDOWN_DIR.iterdir()):
+        if item.name.startswith("."):
+            continue
+
+        if item.is_dir():
+            # Directory: look for .md files inside
+            md_files = sorted(item.glob("*.md"))
+            if not md_files:
+                continue
+            results.append(_scan_one(md_files, item.name, item, "dir"))
+
+        elif item.is_file() and item.suffix == ".md":
+            # Loose .md file
+            results.append(_scan_one([item], item.name, item, "file"))
+
+    return results
+
+
+def scan_single_dir(md_dir: Path) -> dict:
+    """Scan a single directory for MD files. Returns stats dict."""
+    md_files = sorted(md_dir.glob("*.md"))
+    return _scan_one(md_files, md_dir.name, md_dir, "dir")
 
 
 # ── Interactive Selection ────────────────────────────────────────
@@ -294,14 +293,22 @@ def enhance_file(md_path: Path, mode: str, model_id: str) -> dict:
 
 # ── Batch Enhance ────────────────────────────────────────────────
 
-def enhance_all(md_dir: Path, output_dir: Path, mode: str, model_id: str) -> list[dict]:
-    """Enhance all MDs in md_dir, save to output_dir. Returns list of result dicts."""
-    md_files = sorted(md_dir.glob("*.md"))
+def enhance_all(source: dict, output_target: Path, mode: str, model_id: str) -> list[dict]:
+    """Enhance all MDs from a source, save to output_target.
+
+    source: dict from scan_md_sources() with type, md_files, path, etc.
+    output_target: for type="dir" → a directory; for type="file" → a file path.
+    """
+    md_files = source["md_files"]
     if not md_files:
-        console.print(f"[red]No MD files in {md_dir}/[/red]")
+        console.print(f"[red]No MD files in source.[/red]")
         return []
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # Prepare output location
+    if source["type"] == "dir":
+        output_target.mkdir(parents=True, exist_ok=True)
+    else:
+        output_target.parent.mkdir(parents=True, exist_ok=True)
 
     results = []
     total_start = time.time()
@@ -317,7 +324,7 @@ def enhance_all(md_dir: Path, output_dir: Path, mode: str, model_id: str) -> lis
         transient=False,
     ) as progress:
         task = progress.add_task(
-            f"[bold]Enhancing {len(md_files)} files (Mode {mode})[/bold]",
+            f"[bold]Enhancing {len(md_files)} file{'s' if len(md_files) > 1 else ''} (Mode {mode})[/bold]",
             total=len(md_files),
         )
 
@@ -327,7 +334,12 @@ def enhance_all(md_dir: Path, output_dir: Path, mode: str, model_id: str) -> lis
 
                 text = md.read_text(encoding="utf-8")
                 est = estimate_tokens(text, mode)
-                dst = output_dir / md.name
+
+                # Determine destination path
+                if source["type"] == "dir":
+                    dst = output_target / md.name
+                else:
+                    dst = output_target
 
                 console.print(f"\n[cyan bold][{i}/{len(md_files)}] {md.name}[/cyan bold] "
                               f"[dim]({_format_size(md.stat().st_size)}, ~{est['total_tokens']:,} tokens)[/dim]")
@@ -364,10 +376,11 @@ def enhance_all(md_dir: Path, output_dir: Path, mode: str, model_id: str) -> lis
     total_elapsed = time.time() - total_start
     _print_enhance_summary(results, total_elapsed, mode)
 
-    # Copy images from source to enhanced dir
-    for img in list(md_dir.glob("*.jpeg")) + list(md_dir.glob("*.png")):
-        import shutil
-        shutil.copy2(img, output_dir / img.name)
+    # Copy images from source dir to enhanced dir (only for dir type)
+    if source["type"] == "dir":
+        src_dir = source["path"]
+        for img in list(src_dir.glob("*.jpeg")) + list(src_dir.glob("*.png")):
+            shutil.copy2(img, output_target / img.name)
 
     return results
 
@@ -431,36 +444,44 @@ def _print_enhance_summary(results: list[dict], total_elapsed: float, mode: str)
 # ── Interactive Enhance Flow ─────────────────────────────────────
 
 def enhance_interactive():
-    """Full interactive flow: scan output/ → select → mode → model → enhance."""
-    dirs = scan_md_dirs()
+    """Full interactive flow: scan markdown/ → select → mode → model → enhance."""
+    sources = scan_md_sources()
 
-    if not dirs:
-        console.print("[red]No converted MDs found in output/.[/red]")
+    if not sources:
+        console.print(f"[red]No Markdown found in {MARKDOWN_DIR}/.[/red]")
         console.print("[dim]Run conversion first: make convert[/dim]")
+        console.print(f"[dim]Or place .md files directly in {MARKDOWN_DIR}/[/dim]")
         return
 
-    # Show available directories
+    # Show available sources
     info_lines = []
-    for d in dirs:
+    for s in sources:
+        icon = "📁" if s["type"] == "dir" else "📄"
+        n_files = len(s["md_files"])
+        files_label = f"{n_files} file{'s' if n_files > 1 else ''}"
         info_lines.append(
-            f"📁 [cyan]{d['name']}/[/cyan]  "
-            f"{len(d['md_files'])} files · {d['total_lines']:,} lines · {_format_size(d['total_size'])}"
+            f"{icon} [cyan]{s['name']}{'/' if s['type'] == 'dir' else ''}[/cyan]  "
+            f"{files_label} · {s['total_lines']:,} lines · {_format_size(s['total_size'])}"
         )
     console.print(Panel("\n".join(info_lines), title="[bold]Available Markdown[/bold]", border_style="blue"))
 
-    # Select directory
-    options = [
-        f"{d['name']}/  ({len(d['md_files'])} files, {_format_size(d['total_size'])}, "
-        f"~{d['est_tokens_b']:,}B / ~{d['est_tokens_c']:,}C tokens)"
-        for d in dirs
-    ]
-    idx = select_menu("Select directory to enhance:", options)
+    # Select source
+    options = []
+    for s in sources:
+        icon = "📁" if s["type"] == "dir" else "📄"
+        n_files = len(s["md_files"])
+        files_label = f"{n_files} file{'s' if n_files > 1 else ''}"
+        options.append(
+            f"{icon} {s['name']}{'/' if s['type'] == 'dir' else ''}  "
+            f"({files_label}, {_format_size(s['total_size'])}, "
+            f"~{s['est_tokens_b']:,}B / ~{s['est_tokens_c']:,}C tokens)"
+        )
+    idx = select_menu("Select source to enhance:", options)
     if idx is None:
         console.print("[dim]Cancelled.[/dim]")
         return
 
-    selected = dirs[idx]
-    md_dir = selected["dir"]
+    selected = sources[idx]
 
     # Select mode
     mode = select_mode(est_b=selected["est_tokens_b"], est_c=selected["est_tokens_c"])
@@ -481,9 +502,12 @@ def enhance_interactive():
     model_id, model_name = result
     console.print(f"🤖 Model: [cyan]{model_name}[/cyan]")
 
-    # Output directory
-    enhanced_dir = OUTPUT_DIR / f"{selected['name']}_enhanced"
-    console.print(f"📂 Output: [cyan]{enhanced_dir}/[/cyan]")
+    # Determine output target
+    if selected["type"] == "dir":
+        output_target = ENHANCED_DIR / selected["name"]
+    else:
+        output_target = ENHANCED_DIR / selected["name"]
+    console.print(f"📂 Output: [cyan]{output_target}[/cyan]")
 
     # Confirm
     console.print()
@@ -497,8 +521,12 @@ def enhance_interactive():
         return
 
     # Run enhancement
-    enhance_all(md_dir, enhanced_dir, mode, model_id)
+    enhance_all(selected, output_target, mode, model_id)
 
-    console.print(f"\n[bold]Enhanced output:[/bold] [cyan]{enhanced_dir}/[/cyan]")
-    for md in sorted(enhanced_dir.glob("*.md")):
-        console.print(f"  📄 {md.name}  ({_format_size(md.stat().st_size)})")
+    console.print(f"\n[bold]Enhanced output:[/bold] [cyan]{output_target}[/cyan]")
+    if selected["type"] == "dir":
+        for md in sorted(output_target.glob("*.md")):
+            console.print(f"  📄 {md.name}  ({_format_size(md.stat().st_size)})")
+    else:
+        if output_target.exists():
+            console.print(f"  📄 {output_target.name}  ({_format_size(output_target.stat().st_size)})")

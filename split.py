@@ -36,7 +36,7 @@ from convert import (
     print_summary,
     _format_size,
     _quick_page_count,
-    OUTPUT_DIR,
+    MARKDOWN_DIR,
     MARKER_BATCH_BIN,
     MARKER_PERF_ARGS,
 )
@@ -318,7 +318,7 @@ def split_and_convert(pdf_path: Path, pages_per_chunk: int | None = None, worker
             split_method = "headings"
 
     # ── Output directory ─────────────────────────────────────────
-    out_dir = OUTPUT_DIR / stem
+    out_dir = MARKDOWN_DIR / stem
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Execute ──────────────────────────────────────────────────
@@ -456,7 +456,7 @@ def _do_heading_split(pdf_path: Path, out_dir: Path, stem: str):
 
     # Step 1: Convert the whole PDF
     console.print(f"\n[bold]Step 1:[/bold] Converting entire PDF...")
-    stats = convert_single(pdf_path, OUTPUT_DIR, index=1, total=1)
+    stats = convert_single(pdf_path, MARKDOWN_DIR, index=1, total=1)
 
     whole_md_path = Path(stats["md_path"])
     md_text = whole_md_path.read_text(encoding="utf-8")

@@ -8,8 +8,12 @@ __pycache__/
 pdf/*
 !pdf/.gitkeep
 
-output/*
-!output/.gitkeep
+markdown/*
+!markdown/.gitkeep
+
+enhanced/*
+!enhanced/.gitkeep
+
 .claude/
 log.md
 plan.md

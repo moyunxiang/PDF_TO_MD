@@ -18,7 +18,7 @@ from rich.table import Table
 console = Console()
 
 PDF_DIR = Path("pdf")
-OUTPUT_DIR = Path("output")
+MARKDOWN_DIR = Path("markdown")
 MARKER_BIN = Path(".venv/bin/marker_single")
 MARKER_BATCH_BIN = Path(".venv/bin/marker")
 

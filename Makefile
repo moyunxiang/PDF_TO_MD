@@ -28,11 +28,11 @@ split-pages:
 
 # Re-run post-processing only (no re-conversion)
 postprocess:
-	$(VENV) -c "from convert import postprocess_file; from pathlib import Path; [postprocess_file(f) or print(f'  ✓ {f}') for f in sorted(Path('output').glob('*/*.md'))]"
+	$(VENV) -c "from convert import postprocess_file; from pathlib import Path; [postprocess_file(f) or print(f'  ✓ {f}') for f in sorted(Path('markdown').glob('*/*.md'))]"
 
 # Clean output
 clean:
-	rm -rf output/
+	rm -rf markdown/ enhanced/
 
 # Setup environment
 setup:

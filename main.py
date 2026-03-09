@@ -23,7 +23,7 @@ from convert import (
     _format_size,
     _scan_pdfs,
     PDF_DIR,
-    OUTPUT_DIR,
+    MARKDOWN_DIR,
 )
 
 
@@ -56,7 +56,7 @@ def do_convert_all():
     scan = _scan_pdfs(pdfs)
     _show_info_panel(pdfs, scan)
 
-    convert_all(PDF_DIR, OUTPUT_DIR)
+    convert_all(PDF_DIR, MARKDOWN_DIR)
     console.print(f"\n[dim]💡 To enhance with API: make enhance[/dim]")
 
 
@@ -79,8 +79,8 @@ def do_convert_single():
         title="[bold]PDF → Markdown[/bold]", border_style="blue",
     ))
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    stats = convert_single(pdf_path, OUTPUT_DIR, index=1, total=1)
+    MARKDOWN_DIR.mkdir(parents=True, exist_ok=True)
+    stats = convert_single(pdf_path, MARKDOWN_DIR, index=1, total=1)
     print_summary([stats], stats["time"])
     console.print(f"\n[dim]💡 To enhance with API: make enhance[/dim]")
 
@@ -146,8 +146,8 @@ def main():
                     f"📄 [yellow]{scan['total_pages']}[/yellow] pages",
                     title="[bold]PDF → Markdown[/bold]", border_style="blue",
                 ))
-                OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-                stats = convert_single(pdf_path, OUTPUT_DIR, index=1, total=1)
+                MARKDOWN_DIR.mkdir(parents=True, exist_ok=True)
+                stats = convert_single(pdf_path, MARKDOWN_DIR, index=1, total=1)
                 print_summary([stats], stats["time"])
                 console.print(f"\n[dim]💡 To enhance with API: make enhance[/dim]")
             else:
