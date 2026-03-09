@@ -4,9 +4,9 @@ PDF to Markdown — unified entry point.
 
 Usage:
     python main.py              # Interactive main menu
-    python main.py convert      # Jump to convert
-    python main.py split FILE   # Jump to split
-    python main.py compare      # Jump to compare
+    python main.py convert      # Convert all PDFs
+    python main.py enhance      # Enhance MDs with API
+    python main.py split FILE   # Split large PDF
 """
 
 import sys
@@ -17,13 +17,11 @@ from rich.panel import Panel
 from convert import (
     console,
     select_menu,
-    interactive_select,
     convert_single,
     convert_all,
     print_summary,
     _format_size,
     _scan_pdfs,
-    MODES,
     PDF_DIR,
     OUTPUT_DIR,
 )
@@ -58,15 +56,8 @@ def do_convert_all():
     scan = _scan_pdfs(pdfs)
     _show_info_panel(pdfs, scan)
 
-    mode, model_id, model_name = interactive_select(est_b=scan["est_b"], est_c=scan["est_c"])
-
-    mode_line = f"\n🔧 Mode [bold]{mode}[/bold] — {MODES[mode]}"
-    if model_name:
-        mode_line += f"  [cyan]{model_name}[/cyan]"
-    console.print(mode_line)
-
-    est_tokens = scan["est_b"] if mode == "B" else scan["est_c"] if mode == "C" else 0
-    convert_all(PDF_DIR, OUTPUT_DIR, mode, model_id, est_tokens)
+    convert_all(PDF_DIR, OUTPUT_DIR)
+    console.print(f"\n[dim]💡 To enhance with API: make enhance[/dim]")
 
 
 def do_convert_single():
@@ -82,38 +73,25 @@ def do_convert_single():
         return
 
     scan = _scan_pdfs([pdf_path])
-
     console.print(Panel(
         f"📄 [cyan]{pdf_path.name}[/cyan] ({_format_size(scan['total_size'])})\n"
         f"📄 [yellow]{scan['total_pages']}[/yellow] pages",
         title="[bold]PDF → Markdown[/bold]", border_style="blue",
     ))
 
-    mode, model_id, model_name = interactive_select(est_b=scan["est_b"], est_c=scan["est_c"])
-
-    mode_line = f"\n🔧 Mode [bold]{mode}[/bold] — {MODES[mode]}"
-    if model_name:
-        mode_line += f"  [cyan]{model_name}[/cyan]"
-    console.print(mode_line)
-
-    est_tokens = scan["est_b"] if mode == "B" else scan["est_c"] if mode == "C" else 0
-
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     stats = convert_single(pdf_path, OUTPUT_DIR, index=1, total=1)
-
-    if mode in ("B", "C") and model_id:
-        import time
-        from api import enhance_file
-        api_start = time.time()
-        usage = enhance_file(Path(stats["md_path"]), mode, model_id)
-        stats["api_usage"] = usage
-        stats["api_time"] = time.time() - api_start
-        stats["time"] += stats["api_time"]
-
-    print_summary([stats], stats["time"], mode, est_tokens)
+    print_summary([stats], stats["time"])
+    console.print(f"\n[dim]💡 To enhance with API: make enhance[/dim]")
 
 
-def do_split(pdf_name: str | None = None, pages: int | None = None):
+def do_enhance():
+    """Enhance existing MDs with API (independent step)."""
+    from api import enhance_interactive
+    enhance_interactive()
+
+
+def do_split(pdf_name: str | None = None, pages: int | None = None, workers: int | None = None):
     """Split a large PDF by chapters."""
     from split import split_and_convert
 
@@ -135,27 +113,21 @@ def do_split(pdf_name: str | None = None, pages: int | None = None):
         console.print(f"[red bold]Error:[/red bold] {pdf_path} not found")
         return
 
-    split_and_convert(pdf_path, pages_per_chunk=pages)
-
-
-def do_compare():
-    """Compare output vs reference."""
-    from compare import compare_all
-    compare_all()
+    split_and_convert(pdf_path, pages_per_chunk=pages, workers=workers)
 
 
 # ── Main Menu ────────────────────────────────────────────────────
 
 ACTIONS = [
-    ("Convert all PDFs",              do_convert_all),
-    ("Convert single PDF",            do_convert_single),
-    ("Split large PDF by chapters",   lambda: do_split()),
-    ("Compare output vs reference",   do_compare),
+    ("Convert PDFs → Markdown",         do_convert_all),
+    ("Convert single PDF",              do_convert_single),
+    ("Enhance Markdown with API",       do_enhance),
+    ("Split large PDF by chapters",     lambda: do_split()),
 ]
 
 
 def main():
-    # Handle direct subcommand: python main.py convert / split / compare
+    # Handle direct subcommand: python main.py convert / enhance / split
     if len(sys.argv) > 1:
         cmd = sys.argv[1].lower()
         if cmd == "convert":
@@ -174,37 +146,38 @@ def main():
                     f"📄 [yellow]{scan['total_pages']}[/yellow] pages",
                     title="[bold]PDF → Markdown[/bold]", border_style="blue",
                 ))
-                mode, model_id, model_name = interactive_select(est_b=scan["est_b"], est_c=scan["est_c"])
-                mode_line = f"\n🔧 Mode [bold]{mode}[/bold] — {MODES[mode]}"
-                if model_name:
-                    mode_line += f"  [cyan]{model_name}[/cyan]"
-                console.print(mode_line)
-                est_tokens = scan["est_b"] if mode == "B" else scan["est_c"] if mode == "C" else 0
                 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
                 stats = convert_single(pdf_path, OUTPUT_DIR, index=1, total=1)
-                if mode in ("B", "C") and model_id:
-                    import time
-                    from api import enhance_file
-                    api_start = time.time()
-                    usage = enhance_file(Path(stats["md_path"]), mode, model_id)
-                    stats["api_usage"] = usage
-                    stats["api_time"] = time.time() - api_start
-                    stats["time"] += stats["api_time"]
-                print_summary([stats], stats["time"], mode, est_tokens)
+                print_summary([stats], stats["time"])
+                console.print(f"\n[dim]💡 To enhance with API: make enhance[/dim]")
             else:
                 do_convert_all()
             return
+        elif cmd == "enhance":
+            # Optional: enhance a specific directory
+            if len(sys.argv) > 2:
+                from api import enhance_interactive
+                # TODO: could support direct dir path here
+                enhance_interactive()
+            else:
+                do_enhance()
+            return
         elif cmd == "split":
             pdf_name = sys.argv[2] if len(sys.argv) > 2 else None
+            # Don't treat flags as pdf_name
+            if pdf_name and pdf_name.startswith("--"):
+                pdf_name = None
             pages = None
+            workers = None
             if "--pages" in sys.argv:
                 pi = sys.argv.index("--pages")
                 if pi + 1 < len(sys.argv):
                     pages = int(sys.argv[pi + 1])
-            do_split(pdf_name, pages)
-            return
-        elif cmd == "compare":
-            do_compare()
+            if "--workers" in sys.argv:
+                wi = sys.argv.index("--workers")
+                if wi + 1 < len(sys.argv):
+                    workers = int(sys.argv[wi + 1])
+            do_split(pdf_name, pages, workers)
             return
 
     # Interactive main menu

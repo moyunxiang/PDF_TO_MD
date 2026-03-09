@@ -1,17 +1,11 @@
 #!/usr/bin/env python3
 """
 PDF to Markdown converter — marker extraction + post-processing.
-API enhancement is handled separately by api.py.
-
-Usage:
-    python convert.py                    # Convert all PDFs in pdf/
-    python convert.py 1.review-const.pdf # Convert a single PDF
+Pure conversion only. API enhancement is a separate step in api.py.
 """
 
 import json
-import os
 import re
-import sys
 import subprocess
 import time
 from pathlib import Path
@@ -26,16 +20,17 @@ console = Console()
 PDF_DIR = Path("pdf")
 OUTPUT_DIR = Path("output")
 MARKER_BIN = Path(".venv/bin/marker_single")
+MARKER_BATCH_BIN = Path(".venv/bin/marker")
 
-# ── Token estimation constants (calibrated from 13 samples) ─────
-TOKENS_PER_PAGE_B = 260   # Mode B: ~2× content
-TOKENS_PER_PAGE_C = 325   # Mode C: ~2.5× content
-
-MODES = {
-    "A": "Direct output (no API)",
-    "B": "API format cleanup",
-    "C": "API understand + rewrite",
-}
+# ── Performance: override marker defaults (MPS auto-detect is broken) ──
+MARKER_PERF_ARGS = [
+    "--layout_batch_size", "12",
+    "--detection_batch_size", "8",
+    "--recognition_batch_size", "64",
+    "--equation_batch_size", "16",
+    "--table_rec_batch_size", "12",
+    "--ocr_error_batch_size", "12",
+]
 
 # ── Helpers ──────────────────────────────────────────────────────
 
@@ -80,7 +75,7 @@ def _quick_page_count(pdf_path: Path) -> int:
 
 
 def _scan_pdfs(pdf_paths: list[Path]) -> dict:
-    """Scan PDFs for page counts and token estimates."""
+    """Scan PDFs for page counts and sizes."""
     total_pages = 0
     total_size = 0
     per_file = {}
@@ -94,8 +89,6 @@ def _scan_pdfs(pdf_paths: list[Path]) -> dict:
         "per_file": per_file,
         "total_pages": total_pages,
         "total_size": total_size,
-        "est_b": total_pages * TOKENS_PER_PAGE_B,
-        "est_c": total_pages * TOKENS_PER_PAGE_C,
     }
 
 
@@ -107,44 +100,6 @@ def select_menu(title: str, options: list[str]) -> int | None:
     menu = TerminalMenu(options, title=title)
     idx = menu.show()
     return idx
-
-
-def interactive_select(est_b: int = 0, est_c: int = 0) -> tuple[str, str | None, str | None]:
-    """Interactive mode/model selection. Returns (mode, model_id, model_name)."""
-    from api import MODELS
-
-    mode_a = "A) Direct output (no API)"
-    mode_b = f"B) API format cleanup         (~{est_b:,} tokens est.)" if est_b else "B) API format cleanup"
-    mode_c = f"C) API understand + rewrite   (~{est_c:,} tokens est.)" if est_c else "C) API understand + rewrite"
-    mode_options = [mode_a, mode_b, mode_c]
-
-    idx = select_menu("Select mode:", mode_options)
-    if idx is None:
-        console.print("[dim]Cancelled.[/dim]")
-        sys.exit(0)
-
-    mode = list(MODES.keys())[idx]
-
-    if mode == "A":
-        return mode, None, None
-
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if not api_key:
-        console.print("\n[red bold]✗ OPENROUTER_API_KEY not set.[/red bold]")
-        console.print("  Export it first:  [cyan]export OPENROUTER_API_KEY=sk-or-...[/cyan]")
-        sys.exit(1)
-
-    model_options = [f"{k}) {v['name']}" for k, v in MODELS.items()]
-    idx = select_menu("Select model:", model_options)
-    if idx is None:
-        console.print("[dim]Cancelled.[/dim]")
-        sys.exit(0)
-
-    model_key = list(MODELS.keys())[idx]
-    model_id = MODELS[model_key]["id"]
-    model_name = MODELS[model_key]["name"]
-
-    return mode, model_id, model_name
 
 
 # ── Post-processing ──────────────────────────────────────────────
@@ -301,7 +256,7 @@ def convert_single(
 
     # Step 1: marker extraction
     result = subprocess.run(
-        [str(MARKER_BIN), str(pdf_path), "--output_dir", str(output_dir)],
+        [str(MARKER_BIN), str(pdf_path), "--output_dir", str(output_dir), *MARKER_PERF_ARGS],
         capture_output=True, text=True,
     )
     if result.returncode != 0:
@@ -360,29 +315,21 @@ def convert_single(
         "images": meta["images"],
         "code_blocks": pp_stats["code_blocks"],
         "headings": pp_stats["headings"],
-        "api_usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         "out_size": out_size,
         "out_lines": out_lines,
         "time": elapsed,
-        "marker_time": elapsed,
-        "api_time": 0,
     }
 
 
 # ── Summary ──────────────────────────────────────────────────────
 
-def print_summary(results: list[dict], total_elapsed: float, mode: str, est_tokens: int = 0):
-    """Print a rich summary table."""
-    ok = [r for r in results if r["status"] == "ok"]
-    fail = [r for r in results if r["status"] != "ok"]
+def print_summary(results: list[dict], total_elapsed: float):
+    """Print a rich summary table for conversion results."""
+    ok = [r for r in results if r.get("status") == "ok"]
+    fail = [r for r in results if r.get("status") != "ok"]
 
     total_size = sum(r.get("out_size", 0) for r in ok)
     total_pages = sum(r.get("pages", 0) for r in ok)
-
-    total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-    for r in ok:
-        for k in total_usage:
-            total_usage[k] += r.get("api_usage", {}).get(k, 0)
 
     status_text = f"[green bold]✅ {len(ok)}/{len(results)} succeeded[/green bold]"
     if fail:
@@ -393,16 +340,6 @@ def print_summary(results: list[dict], total_elapsed: float, mode: str, est_toke
         f"[dim]📄 {total_pages} pages   💾 {_format_size(total_size)}[/dim]",
     ]
 
-    if mode in ("B", "C") and total_usage["total_tokens"] > 0:
-        token_line = (
-            f"🔢 API tokens: [yellow]{total_usage['prompt_tokens']:,}[/yellow] prompt + "
-            f"[yellow]{total_usage['completion_tokens']:,}[/yellow] completion = "
-            f"[yellow bold]{total_usage['total_tokens']:,}[/yellow bold] total"
-        )
-        if est_tokens > 0:
-            token_line += f"  [dim](est. ~{est_tokens:,})[/dim]"
-        panel_lines.append(token_line)
-
     console.print()
     console.print(Panel("\n".join(panel_lines), title="[bold]Summary[/bold]", border_style="blue"))
 
@@ -411,50 +348,37 @@ def print_summary(results: list[dict], total_elapsed: float, mode: str, est_toke
     table.add_column("Pages", justify="right", style="yellow")
     table.add_column("Images", justify="right", style="yellow")
     table.add_column("Code", justify="right", style="yellow")
-    if mode in ("B", "C"):
-        table.add_column("Tokens", justify="right", style="yellow")
     table.add_column("Size", justify="right")
     table.add_column("Time", justify="right", style="dim")
 
     for r in results:
-        if r["status"] == "ok":
-            time_str = f"{r['time']:.0f}s"
-            if r.get("api_time", 0) > 0:
-                time_str = f"{r['marker_time']:.0f}s+{r['api_time']:.0f}s"
-            row = [r["name"], str(r["pages"]), str(r["images"]), str(r["code_blocks"])]
-            if mode in ("B", "C"):
-                row.append(f"{r['api_usage']['total_tokens']:,}")
-            row.extend([_format_size(r["out_size"]), time_str])
-            table.add_row(*row)
+        if r.get("status") == "ok":
+            table.add_row(
+                r["name"], str(r["pages"]), str(r["images"]),
+                str(r["code_blocks"]), _format_size(r["out_size"]),
+                f"{r['time']:.0f}s",
+            )
         else:
-            ncols = 7 if mode in ("B", "C") else 6
-            row = [f"[red]{r['name']}[/red]"] + ["—"] * (ncols - 2) + ["[red]FAIL[/red]"]
-            table.add_row(*row)
+            table.add_row(f"[red]{r['name']}[/red]", "—", "—", "—", "—", "[red]FAIL[/red]")
 
     if len(ok) > 1:
         table.add_section()
-        total_row = [
+        table.add_row(
             "[bold]TOTAL[/bold]",
             f"[bold]{total_pages}[/bold]",
             f"[bold]{sum(r.get('images', 0) for r in ok)}[/bold]",
             f"[bold]{sum(r.get('code_blocks', 0) for r in ok)}[/bold]",
-        ]
-        if mode in ("B", "C"):
-            total_row.append(f"[bold]{total_usage['total_tokens']:,}[/bold]")
-        total_row.extend([
             f"[bold]{_format_size(total_size)}[/bold]",
             f"[bold]{total_elapsed:.0f}s[/bold]",
-        ])
-        table.add_row(*total_row)
+        )
 
     console.print(table)
 
 
 # ── Batch Conversion ─────────────────────────────────────────────
 
-def convert_all(pdf_dir: Path, output_dir: Path, mode: str = "A", model_id: str | None = None,
-                est_tokens: int = 0):
-    """Convert all PDFs in pdf_dir."""
+def convert_all(pdf_dir: Path, output_dir: Path):
+    """Convert all PDFs in pdf_dir. Pure marker conversion, no API."""
     pdfs = sorted(pdf_dir.glob("*.pdf"))
     if not pdfs:
         console.print(f"[red]No PDFs found in {pdf_dir}/[/red]")
@@ -485,17 +409,6 @@ def convert_all(pdf_dir: Path, output_dir: Path, mode: str = "A", model_id: str 
             try:
                 progress.stop()
                 stats = convert_single(pdf, output_dir, index=i, total=len(pdfs))
-
-                # API enhancement (separate step)
-                if mode in ("B", "C") and model_id:
-                    from api import enhance_file
-                    api_start = time.time()
-                    usage = enhance_file(Path(stats["md_path"]), mode, model_id)
-                    api_time = time.time() - api_start
-                    stats["api_usage"] = usage
-                    stats["api_time"] = api_time
-                    stats["time"] += api_time
-
                 results.append(stats)
                 progress.start()
                 progress.advance(task)
@@ -505,8 +418,7 @@ def convert_all(pdf_dir: Path, output_dir: Path, mode: str = "A", model_id: str 
                 progress.advance(task)
 
     total_elapsed = time.time() - total_start
-    print_summary(results, total_elapsed, mode, est_tokens)
-
+    print_summary(results, total_elapsed)
 
 
 # ── Standalone postprocess for Makefile target ───────────────────

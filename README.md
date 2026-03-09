@@ -24,23 +24,42 @@ make run
 ╰───────────────────────────────────────────╯
 
 What to do?
-> 1) Convert all PDFs
+> 1) Convert PDFs → Markdown
   2) Convert single PDF
-  3) Split large PDF by chapters
-  4) Compare output vs reference
+  3) Enhance Markdown with API
+  4) Split large PDF by chapters
 ```
 
-用 ↑↓ 箭头选择，回车确认。
+## 两步工作流
 
-## 三种模式
+### Step 1: 转换（纯本地，不花钱）
 
-| 模式 | 说明 | 需要 API |
-|---|---|---|
-| **A** | marker 本地转换 + 自动后处理 | ❌ |
-| **B** | A + API 格式整理（保持内容不变） | ✅ |
-| **C** | A + API 理解重写（重组内容结构） | ✅ |
+```bash
+make convert          # 批量转换所有 PDF
+make convert-one F=xxx.pdf  # 单文件转换
+make split F=xxx.pdf  # 大 PDF 按章节拆分转换
+```
 
-## 可用模型（通过 OpenRouter）
+marker 本地 ML 模型提取 PDF → Markdown + 自动后处理（代码块语言标记、标题规范化等）。
+
+输出到 `output/{pdf_name}/`。
+
+### Step 2: API 增强（可选，需要 API key）
+
+```bash
+make enhance
+```
+
+扫描已转换的 MD 文件，**基于实际内容精确估算 token**，选择增强模式和模型后执行。
+
+输出到 `output/{pdf_name}_enhanced/`（不覆盖原始 MD）。
+
+| 模式 | 说明 |
+|---|---|
+| **B** | 格式整理（保持内容不变，修复排版） |
+| **C** | 理解重写（重组为学习笔记） |
+
+### 可用模型（通过 OpenRouter）
 
 | 模型 | 特点 |
 |---|---|
@@ -53,11 +72,11 @@ What to do?
 | 命令 | 说明 |
 |---|---|
 | `make run` | **主入口** — 交互式主菜单 |
-| `make convert` | 批量转换（弹菜单） |
-| `make convert-one F=xxx.pdf` | 单文件转换（弹菜单） |
+| `make convert` | 批量转换（纯 marker） |
+| `make convert-one F=xxx.pdf` | 单文件转换 |
+| `make enhance` | API 增强已有 MD（独立步骤） |
 | `make split F=xxx.pdf` | 大 PDF 按章节拆分转换 |
-| `make split-pages F=xxx.pdf P=50` | 每 50 页拆一个 |
-| `make compare` | 对比 output/ vs md_ref/ |
+| `make split F=xxx.pdf W=3` | 指定并行 worker 数 |
 | `make clean` | 清理产出 |
 | `make setup` | 安装环境 |
 
@@ -68,7 +87,7 @@ What to do?
 | 方式 | 说明 |
 |---|---|
 | **By bookmarks** | PDF 有书签时自动检测章节（最精确） |
-| **By page count** | 每 N 页拆一个（`make split-pages P=50`） |
+| **By page count** | 每 N 页拆一个（`make split F=xxx.pdf --pages 50`） |
 | **By headings** | 整个转换后按 `#` 标题切成多个 MD |
 
 ## 项目结构
@@ -76,10 +95,8 @@ What to do?
 ```
 main.py      → 统一入口（主菜单）
 convert.py   → 核心转换（marker + 后处理）
-api.py       → API 增强（OpenRouter 调用）
+api.py       → API 增强（独立步骤，OpenRouter）
 split.py     → 大 PDF 拆分
-compare.py   → 输出对比
 pdf/         → 输入 PDF 文件
-md_ref/      → 参考 Markdown
 output/      → 转换产出（自动创建）
 ```
