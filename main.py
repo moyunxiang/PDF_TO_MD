@@ -20,6 +20,7 @@ from convert import (
     convert_single,
     convert_all,
     print_summary,
+    ask_ocr_mode,
     _format_size,
     _scan_pdfs,
     PDF_DIR,
@@ -56,7 +57,10 @@ def do_convert_all():
     scan = _scan_pdfs(pdfs)
     _show_info_panel(pdfs, scan)
 
-    convert_all(PDF_DIR, MARKDOWN_DIR)
+    # Ask OCR mode (use first PDF for auto-detect sampling)
+    disable_ocr = ask_ocr_mode(pdfs[0])
+
+    convert_all(PDF_DIR, MARKDOWN_DIR, disable_ocr=disable_ocr)
     console.print(f"\n[dim]💡 To enhance with API: make enhance[/dim]")
 
 
@@ -79,8 +83,11 @@ def do_convert_single():
         title="[bold]PDF → Markdown[/bold]", border_style="blue",
     ))
 
+    # Ask OCR mode
+    disable_ocr = ask_ocr_mode(pdf_path)
+
     MARKDOWN_DIR.mkdir(parents=True, exist_ok=True)
-    stats = convert_single(pdf_path, MARKDOWN_DIR, index=1, total=1)
+    stats = convert_single(pdf_path, MARKDOWN_DIR, index=1, total=1, disable_ocr=disable_ocr)
     print_summary([stats], stats["time"])
     console.print(f"\n[dim]💡 To enhance with API: make enhance[/dim]")
 
@@ -91,7 +98,7 @@ def do_enhance():
     enhance_interactive()
 
 
-def do_split(pdf_name: str | None = None, pages: int | None = None, workers: int | None = None):
+def do_split(pdf_name: str | None = None, pages: int | None = None):
     """Split a large PDF by chapters."""
     from split import split_and_convert
 
@@ -113,7 +120,7 @@ def do_split(pdf_name: str | None = None, pages: int | None = None, workers: int
         console.print(f"[red bold]Error:[/red bold] {pdf_path} not found")
         return
 
-    split_and_convert(pdf_path, pages_per_chunk=pages, workers=workers)
+    split_and_convert(pdf_path, pages_per_chunk=pages)
 
 
 # ── Main Menu ────────────────────────────────────────────────────
@@ -146,21 +153,16 @@ def main():
                     f"📄 [yellow]{scan['total_pages']}[/yellow] pages",
                     title="[bold]PDF → Markdown[/bold]", border_style="blue",
                 ))
+                disable_ocr = ask_ocr_mode(pdf_path)
                 MARKDOWN_DIR.mkdir(parents=True, exist_ok=True)
-                stats = convert_single(pdf_path, MARKDOWN_DIR, index=1, total=1)
+                stats = convert_single(pdf_path, MARKDOWN_DIR, index=1, total=1, disable_ocr=disable_ocr)
                 print_summary([stats], stats["time"])
                 console.print(f"\n[dim]💡 To enhance with API: make enhance[/dim]")
             else:
                 do_convert_all()
             return
         elif cmd == "enhance":
-            # Optional: enhance a specific directory
-            if len(sys.argv) > 2:
-                from api import enhance_interactive
-                # TODO: could support direct dir path here
-                enhance_interactive()
-            else:
-                do_enhance()
+            do_enhance()
             return
         elif cmd == "split":
             pdf_name = sys.argv[2] if len(sys.argv) > 2 else None
@@ -168,16 +170,11 @@ def main():
             if pdf_name and pdf_name.startswith("--"):
                 pdf_name = None
             pages = None
-            workers = None
             if "--pages" in sys.argv:
                 pi = sys.argv.index("--pages")
                 if pi + 1 < len(sys.argv):
                     pages = int(sys.argv[pi + 1])
-            if "--workers" in sys.argv:
-                wi = sys.argv.index("--workers")
-                if wi + 1 < len(sys.argv):
-                    workers = int(sys.argv[wi + 1])
-            do_split(pdf_name, pages, workers)
+            do_split(pdf_name, pages)
             return
 
     # Interactive main menu

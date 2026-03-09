@@ -18,13 +18,13 @@ convert-one:
 enhance:
 	$(VENV) main.py enhance
 
-# Split a large PDF: make split F=textbook.pdf [W=3]
+# Split a large PDF: make split F=textbook.pdf
 split:
-	$(VENV) main.py split $(F) $(if $(W),--workers $(W))
+	$(VENV) main.py split $(F)
 
-# Split by page count: make split-pages F=textbook.pdf P=50 [W=3]
+# Split by page count: make split-pages F=textbook.pdf P=50
 split-pages:
-	$(VENV) main.py split $(F) --pages $(P) $(if $(W),--workers $(W))
+	$(VENV) main.py split $(F) --pages $(P)
 
 # Re-run post-processing only (no re-conversion)
 postprocess:

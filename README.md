@@ -79,7 +79,6 @@ make enhance
 | `make convert-one F=xxx.pdf` | 单文件转换 |
 | `make enhance` | API 增强已有 MD（独立步骤） |
 | `make split F=xxx.pdf` | 大 PDF 按章节拆分转换 |
-| `make split F=xxx.pdf W=3` | 指定并行 worker 数 |
 | `make clean` | 清理产出 |
 | `make setup` | 安装环境 |
 

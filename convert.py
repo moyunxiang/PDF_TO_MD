@@ -6,7 +6,6 @@ Pure conversion only. API enhancement is a separate step in api.py.
 
 import json
 import re
-import subprocess
 import time
 from pathlib import Path
 
@@ -19,18 +18,94 @@ console = Console()
 
 PDF_DIR = Path("pdf")
 MARKDOWN_DIR = Path("markdown")
-MARKER_BIN = Path(".venv/bin/marker_single")
-MARKER_BATCH_BIN = Path(".venv/bin/marker")
 
 # ── Performance: override marker defaults (MPS auto-detect is broken) ──
-MARKER_PERF_ARGS = [
-    "--layout_batch_size", "12",
-    "--detection_batch_size", "8",
-    "--recognition_batch_size", "64",
-    "--equation_batch_size", "16",
-    "--table_rec_batch_size", "12",
-    "--ocr_error_batch_size", "12",
-]
+MARKER_CONFIG = {
+    "layout_batch_size": 12,
+    "detection_batch_size": 8,
+    "recognition_batch_size": 64,
+    "equation_batch_size": 16,
+    "table_rec_batch_size": 12,
+    "ocr_error_batch_size": 12,
+    "pdftext_workers": 1,
+}
+
+# ── Model Cache ──────────────────────────────────────────────────
+
+_models = None
+
+
+def _get_models():
+    """Lazy-load marker ML models (cached after first call)."""
+    global _models
+    if _models is None:
+        console.print("\n⏳ [bold]Loading ML models...[/bold]")
+        load_start = time.time()
+        from marker.models import create_model_dict
+        _models = create_model_dict()
+        console.print(f"  [dim]Models loaded in {time.time() - load_start:.1f}s[/dim]")
+    return _models
+
+
+# ── OCR Detection ────────────────────────────────────────────────
+
+def _detect_needs_ocr(pdf_path: Path, sample_pages: int = 5) -> tuple[bool, float]:
+    """Sample a few pages to check if PDF has extractable text.
+
+    Returns (needs_ocr, avg_chars_per_page).
+    If avg chars < 50 per page → probably scanned → needs OCR.
+    """
+    import pypdfium2
+    doc = pypdfium2.PdfDocument(str(pdf_path))
+    total = len(doc)
+    # Sample evenly spaced pages (skip first page which might be a cover)
+    indices = [min(i, total - 1) for i in range(1, sample_pages + 1)]
+    indices = list(dict.fromkeys(indices))  # deduplicate
+
+    total_chars = 0
+    for i in indices:
+        page = doc[i]
+        tp = page.get_textpage()
+        text = tp.get_text_bounded()
+        total_chars += len(text.strip())
+    doc.close()
+
+    avg = total_chars / max(len(indices), 1)
+    return avg < 50, avg
+
+
+def ask_ocr_mode(pdf_path: Path) -> bool:
+    """Ask user for OCR mode. Returns disable_ocr (True = skip OCR).
+
+    Options:
+      - Auto-detect: sample PDF, decide automatically
+      - Off: always skip OCR (fastest for text PDFs)
+    """
+    options = [
+        "Auto-detect (sample pages to decide)",
+        "Off — skip OCR (fastest for text PDFs)",
+    ]
+    idx = select_menu("OCR mode:", options)
+    if idx is None:
+        # Default: auto-detect
+        idx = 0
+
+    if idx == 1:
+        # Force off
+        console.print("  🔇 OCR [bold]disabled[/bold] (direct text extraction)")
+        return True
+
+    # Auto-detect
+    console.print("  🔍 Sampling pages...", end=" ")
+    needs_ocr, avg_chars = _detect_needs_ocr(pdf_path)
+
+    if needs_ocr:
+        console.print(f"[yellow]⚠ Low text ({avg_chars:.0f} chars/page) → OCR [bold]enabled[/bold] (scanned PDF)[/yellow]")
+        return False
+    else:
+        console.print(f"[green]✓ Text detected ({avg_chars:.0f} chars/page) → OCR [bold]disabled[/bold][/green]")
+        return True
+
 
 # ── Helpers ──────────────────────────────────────────────────────
 
@@ -239,39 +314,49 @@ def postprocess(text: str) -> tuple[str, dict]:
     return text, stats
 
 
-# ── Conversion (marker + postprocess only, NO API) ──────────────
+# ── Conversion (marker library + postprocess, NO API) ───────────
+
+def _make_config(disable_ocr: bool = True) -> dict:
+    """Build marker config with OCR setting."""
+    return {**MARKER_CONFIG, "disable_ocr": disable_ocr}
+
 
 def convert_single(
     pdf_path: Path,
     output_dir: Path,
     index: int | None = None,
     total: int | None = None,
+    disable_ocr: bool = True,
 ) -> dict:
     """Convert a single PDF to Markdown (marker + postprocess). Returns stats dict."""
+    from marker.converters.pdf import PdfConverter
+    from marker.output import save_output
+
     pdf_size = pdf_path.stat().st_size
     prefix = f"[{index}/{total}]" if index and total else ""
 
     console.print(f"\n[cyan bold]{prefix} {pdf_path.name}[/cyan bold] [dim]({_format_size(pdf_size)})[/dim]")
     start = time.time()
 
-    # Step 1: marker extraction
-    result = subprocess.run(
-        [str(MARKER_BIN), str(pdf_path), "--output_dir", str(output_dir), *MARKER_PERF_ARGS],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        console.print(f"  [red bold]✗ marker error:[/red bold]\n[red]{result.stderr[:500]}[/red]")
-        raise RuntimeError(f"marker failed for {pdf_path.name}")
+    # Step 1: marker extraction (library API — shows tqdm per page)
+    models = _get_models()
+    config = _make_config(disable_ocr=disable_ocr)
+    converter = PdfConverter(artifact_dict=models, config=config)
+    rendered = converter(str(pdf_path))
 
     stem = pdf_path.stem
-    md_path = output_dir / stem / f"{stem}.md"
-    meta_path = output_dir / stem / f"{stem}_meta.json"
+    part_out_dir = output_dir / stem
+    part_out_dir.mkdir(parents=True, exist_ok=True)
+    save_output(rendered, str(part_out_dir), stem)
+
+    md_path = part_out_dir / f"{stem}.md"
+    meta_path = part_out_dir / f"{stem}_meta.json"
 
     marker_time = time.time() - start
 
     # Parse marker metadata
     meta = _parse_meta(meta_path)
-    image_files = list((output_dir / stem).glob("*.jpeg")) + list((output_dir / stem).glob("*.png"))
+    image_files = list(part_out_dir.glob("*.jpeg")) + list(part_out_dir.glob("*.png"))
     meta["images"] = len(image_files)
 
     console.print(f"  ├ [green]marker:[/green]  [yellow]{meta['pages']}[/yellow] pages, "
@@ -377,7 +462,7 @@ def print_summary(results: list[dict], total_elapsed: float):
 
 # ── Batch Conversion ─────────────────────────────────────────────
 
-def convert_all(pdf_dir: Path, output_dir: Path):
+def convert_all(pdf_dir: Path, output_dir: Path, disable_ocr: bool = True):
     """Convert all PDFs in pdf_dir. Pure marker conversion, no API."""
     pdfs = sorted(pdf_dir.glob("*.pdf"))
     if not pdfs:
@@ -408,7 +493,7 @@ def convert_all(pdf_dir: Path, output_dir: Path):
         for i, pdf in enumerate(pdfs, 1):
             try:
                 progress.stop()
-                stats = convert_single(pdf, output_dir, index=i, total=len(pdfs))
+                stats = convert_single(pdf, output_dir, index=i, total=len(pdfs), disable_ocr=disable_ocr)
                 results.append(stats)
                 progress.start()
                 progress.advance(task)

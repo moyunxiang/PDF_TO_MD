@@ -11,21 +11,17 @@ Supports three split methods:
 Usage (via main.py):
     python main.py split textbook.pdf              # Auto-detect bookmarks
     python main.py split textbook.pdf --pages 50   # Split every 50 pages
-    python main.py split textbook.pdf --workers 3  # Parallel workers
 """
 
 import json
-import os
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
 
 import pypdfium2
-from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, MofNCompleteColumn, SpinnerColumn
 from rich.panel import Panel
 
 from convert import (
@@ -34,11 +30,12 @@ from convert import (
     postprocess,
     select_menu,
     print_summary,
+    ask_ocr_mode,
     _format_size,
     _quick_page_count,
+    _get_models,
+    _make_config,
     MARKDOWN_DIR,
-    MARKER_BATCH_BIN,
-    MARKER_PERF_ARGS,
 )
 
 # ── TOC / Bookmark Reading ───────────────────────────────────────
@@ -177,95 +174,9 @@ def _split_md_by_headings(md_text: str) -> list[tuple[str, str]]:
     return sections
 
 
-# ── Hardware Detection ───────────────────────────────────────────
-
-def _detect_hardware() -> dict:
-    """Detect CPU cores and total memory for worker recommendation."""
-    cpu_count = os.cpu_count() or 4
-
-    # Try to get total memory
-    total_mem_gb = 8  # fallback
-    try:
-        result = subprocess.run(
-            ["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode == 0:
-            total_mem_gb = int(result.stdout.strip()) // (1024 ** 3)
-    except Exception:
-        pass
-
-    # Try to get CPU brand
-    cpu_brand = "Unknown"
-    try:
-        result = subprocess.run(
-            ["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode == 0:
-            cpu_brand = result.stdout.strip()
-    except Exception:
-        pass
-
-    # Each marker worker uses ~8 GB peak (5 ML models + PyTorch + tensors)
-    # Keep ~4 GB free for OS + apps
-    mem_per_worker = 8
-    usable_mem = max(0, total_mem_gb - 4)
-    max_by_mem = max(1, usable_mem // mem_per_worker)
-    max_by_cpu = max(1, cpu_count // 4)
-    recommended = max(1, min(max_by_mem, max_by_cpu))
-
-    return {
-        "cpu_count": cpu_count,
-        "cpu_brand": cpu_brand,
-        "total_mem_gb": total_mem_gb,
-        "recommended_workers": recommended,
-        "max_safe_workers": max_by_mem,
-    }
-
-
-def _ask_workers(n_parts: int, workers_override: int | None = None) -> int:
-    """Ask user for worker count, or use override if provided."""
-    hw = _detect_hardware()
-
-    # If CLI override, use it (but warn if too high)
-    if workers_override is not None:
-        if workers_override > hw["max_safe_workers"]:
-            console.print(
-                f"[yellow]⚠️  {workers_override} workers may cause memory swapping "
-                f"on {hw['total_mem_gb']}GB RAM (each worker uses ~8GB)[/yellow]"
-            )
-        return max(1, workers_override)
-
-    # Show hardware info panel
-    rec = hw["recommended_workers"]
-    max_safe = hw["max_safe_workers"]
-    info_lines = [
-        f"🖥  [bold]{hw['cpu_brand']}[/bold] · {hw['cpu_count']} cores · {hw['total_mem_gb']} GB",
-        f"📦 [yellow]{n_parts}[/yellow] parts to convert (~8 GB/worker)",
-        f"⚡ Recommended: [green bold]{rec}[/green bold] workers (safe max: {max_safe})",
-    ]
-    console.print(Panel("\n".join(info_lines), title="[bold]Performance[/bold]", border_style="yellow"))
-
-    # Ask user
-    try:
-        raw = input(f"⚡ Workers [{rec}]: ").strip()
-        if not raw:
-            return rec
-        workers = int(raw)
-        if workers < 1:
-            workers = 1
-        if workers > max_safe:
-            console.print(
-                f"[yellow]⚠️  {workers} workers may exceed {hw['total_mem_gb']}GB RAM — "
-                f"each worker loads ~8GB of ML models. Proceed anyway.[/yellow]"
-            )
-        return workers
-    except (ValueError, EOFError):
-        return rec
-
-
 # ── Main Split + Convert Flow ────────────────────────────────────
 
-def split_and_convert(pdf_path: Path, pages_per_chunk: int | None = None, workers: int | None = None):
+def split_and_convert(pdf_path: Path, pages_per_chunk: int | None = None):
     """Main entry: split a PDF and convert each part to Markdown (no API)."""
     total_pages = _quick_page_count(pdf_path)
     pdf_size = pdf_path.stat().st_size
@@ -284,6 +195,9 @@ def split_and_convert(pdf_path: Path, pages_per_chunk: int | None = None, worker
         info_lines.append("[dim]📑 No bookmarks found[/dim]")
 
     console.print(Panel("\n".join(info_lines), title="[bold]PDF Split → Markdown[/bold]", border_style="blue"))
+
+    # ── OCR mode ─────────────────────────────────────────────────
+    disable_ocr = ask_ocr_mode(pdf_path)
 
     # ── Choose split method ──────────────────────────────────────
     if pages_per_chunk:
@@ -323,18 +237,21 @@ def split_and_convert(pdf_path: Path, pages_per_chunk: int | None = None, worker
 
     # ── Execute ──────────────────────────────────────────────────
     if split_method == "headings":
-        _do_heading_split(pdf_path, out_dir, stem)
+        _do_heading_split(pdf_path, out_dir, stem, disable_ocr=disable_ocr)
     else:
-        _do_pdf_split(pdf_path, out_dir, split_method, toc, pages_per_chunk, workers)
+        _do_pdf_split(pdf_path, out_dir, split_method, toc, pages_per_chunk, disable_ocr=disable_ocr)
 
 
 def _do_pdf_split(pdf_path: Path, out_dir: Path, method: str, toc: list[dict],
-                  pages_per_chunk: int | None, workers_override: int | None = None):
-    """Split PDF into parts, batch convert with marker, postprocess."""
+                  pages_per_chunk: int | None, disable_ocr: bool = True):
+    """Split PDF into parts, convert each with marker library (page-level tqdm), postprocess."""
+    from marker.converters.pdf import PdfConverter
+    from marker.output import save_output
+
     with tempfile.TemporaryDirectory(prefix="pdf_split_") as tmp:
         tmp_dir = Path(tmp)
 
-        # Step 1: Split PDF into parts (into a clean input-only directory)
+        # Step 1: Split PDF into parts
         input_dir = tmp_dir / "_input"
         input_dir.mkdir()
 
@@ -343,53 +260,39 @@ def _do_pdf_split(pdf_path: Path, out_dir: Path, method: str, toc: list[dict],
         else:
             parts = _split_pdf_by_pages(pdf_path, pages_per_chunk, input_dir)
 
-        # Step 2: Ask user for workers
-        n_workers = _ask_workers(len(parts), workers_override)
+        total_pages = sum(p["pages"] for p in parts)
+        console.print(f"\n[bold]Converting {len(parts)} parts ({total_pages} pages)...[/bold]")
 
-        console.print(f"\n[bold]Converting {len(parts)} parts with {n_workers} worker(s)...[/bold]")
+        # Step 2: Load models once
+        models = _get_models()
+        config = _make_config(disable_ocr=disable_ocr)
 
-        # Step 3: Batch convert with marker CLI
-        batch_out_dir = tmp_dir / "_batch_out"
-        batch_out_dir.mkdir()
-
+        # Step 3: Convert each part (tqdm shows per-page progress)
         total_start = time.time()
-
-        cmd = [
-            str(MARKER_BATCH_BIN), str(input_dir),
-            "--workers", str(n_workers),
-            "--output_dir", str(batch_out_dir),
-            *MARKER_PERF_ARGS,
-        ]
-        console.print(f"[dim]$ {' '.join(str(c) for c in cmd[:6])} ...[/dim]")
-
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        marker_time = time.time() - total_start
-
-        if result.returncode != 0:
-            console.print(f"[red bold]✗ marker batch error:[/red bold]\n[red]{result.stderr[:1000]}[/red]")
-            raise RuntimeError("marker batch conversion failed")
-
-        # Print marker's throughput info if available
-        for line in (result.stdout + result.stderr).splitlines():
-            if "pages" in line.lower() and ("throughput" in line.lower() or "pages/sec" in line.lower()):
-                console.print(f"  [dim]{line.strip()}[/dim]")
-                break
-
-        console.print(f"  ⏱  marker batch done in [bold]{marker_time:.1f}s[/bold]")
-
-        # Step 4: Postprocess + move to final directory
-        console.print(f"\n[bold]Post-processing {len(parts)} parts...[/bold]")
-
         results = []
-        for i, part in enumerate(parts, 1):
-            part_stem = part["pdf_path"].stem
-            # marker outputs to batch_out_dir/stem/stem.md
-            src_dir = batch_out_dir / part_stem
-            src_md = src_dir / f"{part_stem}.md"
 
+        for i, part in enumerate(parts, 1):
+            part_start = time.time()
+            part_stem = part["pdf_path"].stem
+
+            console.print(f"\n[cyan bold][{i}/{len(parts)}] {part['slug']}[/cyan bold] "
+                          f"[dim]({part['pages']} pages)[/dim]")
+
+            # Convert with marker library (tqdm bars visible)
+            converter = PdfConverter(artifact_dict=models, config=config)
+            rendered = converter(str(part["pdf_path"]))
+
+            # Save to temp location
+            part_out_dir = tmp_dir / part_stem
+            part_out_dir.mkdir(parents=True, exist_ok=True)
+            save_output(rendered, str(part_out_dir), part_stem)
+
+            part_time = time.time() - part_start
+
+            # Read and postprocess
+            src_md = part_out_dir / f"{part_stem}.md"
             if not src_md.exists():
-                # Try to find any .md file in the directory
-                md_files = list(src_dir.glob("*.md")) if src_dir.exists() else []
+                md_files = list(part_out_dir.glob("*.md"))
                 if md_files:
                     src_md = md_files[0]
                 else:
@@ -397,12 +300,11 @@ def _do_pdf_split(pdf_path: Path, out_dir: Path, method: str, toc: list[dict],
                     results.append({"name": part["slug"], "status": "error", "error": "no output"})
                     continue
 
-            # Read and postprocess
             text = src_md.read_text(encoding="utf-8")
             text, pp_stats = postprocess(text)
 
-            # Read meta.json for page/image count
-            meta_path = src_dir / f"{part_stem}_meta.json"
+            # Read meta for image count
+            meta_path = part_out_dir / f"{part_stem}_meta.json"
             pages = part["pages"]
             images = 0
             if meta_path.exists():
@@ -412,12 +314,12 @@ def _do_pdf_split(pdf_path: Path, out_dir: Path, method: str, toc: list[dict],
                 except Exception:
                     pass
 
-            # Write postprocessed MD to final location
+            # Write to final location
             dst_md = out_dir / f"{part['slug']}.md"
             dst_md.write_text(text, encoding="utf-8")
 
             # Copy images
-            for img in list(src_dir.glob("*.jpeg")) + list(src_dir.glob("*.png")):
+            for img in list(part_out_dir.glob("*.jpeg")) + list(part_out_dir.glob("*.png")):
                 shutil.copy2(img, out_dir / img.name)
 
             stats = {
@@ -430,14 +332,14 @@ def _do_pdf_split(pdf_path: Path, out_dir: Path, method: str, toc: list[dict],
                 "headings": pp_stats["headings"],
                 "out_size": dst_md.stat().st_size,
                 "out_lines": len(text.splitlines()),
-                "time": marker_time / len(parts),  # approximate per-part
+                "time": part_time,
             }
 
             console.print(
-                f"  ✓ [{i}/{len(parts)}] [dim]{part['slug']}.md[/dim]"
-                f"  ({pages}p, {_format_size(stats['out_size'])},"
+                f"  ✓ {pages}p, {_format_size(stats['out_size'])},"
                 f" {stats['out_lines']} lines,"
-                f" {pp_stats['headings']}h, {images} img)"
+                f" {pp_stats['headings']}h, {images} img"
+                f"  [dim]{part_time:.1f}s[/dim]"
             )
             results.append(stats)
 
@@ -450,13 +352,13 @@ def _do_pdf_split(pdf_path: Path, out_dir: Path, method: str, toc: list[dict],
         console.print(f"\n[dim]💡 To enhance with API: make enhance[/dim]")
 
 
-def _do_heading_split(pdf_path: Path, out_dir: Path, stem: str):
+def _do_heading_split(pdf_path: Path, out_dir: Path, stem: str, disable_ocr: bool = True):
     """Convert whole PDF, then split the resulting MD by headings."""
     total_start = time.time()
 
     # Step 1: Convert the whole PDF
     console.print(f"\n[bold]Step 1:[/bold] Converting entire PDF...")
-    stats = convert_single(pdf_path, MARKDOWN_DIR, index=1, total=1)
+    stats = convert_single(pdf_path, MARKDOWN_DIR, index=1, total=1, disable_ocr=disable_ocr)
 
     whole_md_path = Path(stats["md_path"])
     md_text = whole_md_path.read_text(encoding="utf-8")
