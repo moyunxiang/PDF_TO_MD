@@ -55,6 +55,8 @@ make convert-one F=xxx.pdf  # 单文件转换
 
 marker 本地 ML 模型提取 PDF → Markdown + 自动后处理（代码块语言标记、标题规范化等）。
 
+> **性能优化**：float16 半精度推理 + 加大 batch size + 砍掉无用 LLM 处理器，比默认配置快 1.5-2x。
+
 > **智能扫描**：如果 `pdf/textbook/` 下有拆分 PDF，会自动转换这些章节（跳过原件 `pdf/textbook.pdf`）。
 
 输出到 `markdown/`，结构与 `pdf/` 对应。

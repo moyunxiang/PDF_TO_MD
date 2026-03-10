@@ -20,15 +20,38 @@ PDF_DIR = Path("pdf")
 MARKDOWN_DIR = Path("markdown")
 
 # ── Performance: override marker defaults (MPS auto-detect is broken) ──
+# float16 halves memory → double batch sizes for better GPU utilization
 MARKER_CONFIG = {
-    "layout_batch_size": 12,
-    "detection_batch_size": 8,
-    "recognition_batch_size": 64,
-    "equation_batch_size": 16,
-    "table_rec_batch_size": 12,
-    "ocr_error_batch_size": 12,
+    "layout_batch_size": 24,
+    "detection_batch_size": 16,
+    "recognition_batch_size": 128,
+    "equation_batch_size": 32,
+    "table_rec_batch_size": 24,
+    "ocr_error_batch_size": 24,
     "pdftext_workers": 1,
 }
+
+# Strip LLM processors (no LLM service configured, they just waste cycles)
+PROCESSORS = [
+    "marker.processors.order.OrderProcessor",
+    "marker.processors.block_relabel.BlockRelabelProcessor",
+    "marker.processors.line_merge.LineMergeProcessor",
+    "marker.processors.blockquote.BlockquoteProcessor",
+    "marker.processors.code.CodeProcessor",
+    "marker.processors.document_toc.DocumentTOCProcessor",
+    "marker.processors.equation.EquationProcessor",
+    "marker.processors.footnote.FootnoteProcessor",
+    "marker.processors.ignoretext.IgnoreTextProcessor",
+    "marker.processors.line_numbers.LineNumbersProcessor",
+    "marker.processors.list.ListProcessor",
+    "marker.processors.page_header.PageHeaderProcessor",
+    "marker.processors.sectionheader.SectionHeaderProcessor",
+    "marker.processors.table.TableProcessor",
+    "marker.processors.text.TextProcessor",
+    "marker.processors.reference.ReferenceProcessor",
+    "marker.processors.blank_page.BlankPageProcessor",
+    "marker.processors.debug.DebugProcessor",
+]
 
 # ── Model Cache ──────────────────────────────────────────────────
 
@@ -36,13 +59,14 @@ _models = None
 
 
 def _get_models():
-    """Lazy-load marker ML models (cached after first call)."""
+    """Lazy-load marker ML models with float16 (cached after first call)."""
     global _models
     if _models is None:
-        console.print("\n⏳ [bold]Loading ML models...[/bold]")
+        console.print("\n⏳ [bold]Loading ML models (float16)...[/bold]")
         load_start = time.time()
+        import torch
         from marker.models import create_model_dict
-        _models = create_model_dict()
+        _models = create_model_dict(dtype=torch.float16)
         console.print(f"  [dim]Models loaded in {time.time() - load_start:.1f}s[/dim]")
     return _models
 
@@ -340,6 +364,13 @@ def convert_single(
 
     pdf_size = pdf_path.stat().st_size
     prefix = f"[{index}/{total}]" if index and total else ""
+    stem = pdf_path.stem
+
+    # Skip if already converted
+    existing_md = output_dir / stem / f"{stem}.md"
+    if existing_md.exists() and existing_md.stat().st_size > 0:
+        console.print(f"\n[dim]{prefix} {pdf_path.name} — already converted, skipping[/dim]")
+        return {"name": pdf_path.name, "status": "skipped"}
 
     console.print(f"\n[cyan bold]{prefix} {pdf_path.name}[/cyan bold] [dim]({_format_size(pdf_size)})[/dim]")
     start = time.time()
@@ -347,10 +378,9 @@ def convert_single(
     # Step 1: marker extraction (library API — shows tqdm per page)
     models = _get_models()
     config = _make_config(disable_ocr=disable_ocr)
-    converter = PdfConverter(artifact_dict=models, config=config)
+    converter = PdfConverter(artifact_dict=models, processor_list=PROCESSORS, config=config)
     rendered = converter(str(pdf_path))
 
-    stem = pdf_path.stem
     part_out_dir = output_dir / stem
     part_out_dir.mkdir(parents=True, exist_ok=True)
     save_output(rendered, str(part_out_dir), stem)
@@ -417,12 +447,15 @@ def convert_single(
 def print_summary(results: list[dict], total_elapsed: float):
     """Print a rich summary table for conversion results."""
     ok = [r for r in results if r.get("status") == "ok"]
-    fail = [r for r in results if r.get("status") != "ok"]
+    skipped = [r for r in results if r.get("status") == "skipped"]
+    fail = [r for r in results if r.get("status") not in ("ok", "skipped")]
 
     total_size = sum(r.get("out_size", 0) for r in ok)
     total_pages = sum(r.get("pages", 0) for r in ok)
 
     status_text = f"[green bold]✅ {len(ok)}/{len(results)} succeeded[/green bold]"
+    if skipped:
+        status_text += f"  [dim]⏭ {len(skipped)} skipped[/dim]"
     if fail:
         status_text += f"  [red bold]❌ {len(fail)} failed[/red bold]"
 
@@ -449,6 +482,8 @@ def print_summary(results: list[dict], total_elapsed: float):
                 str(r["code_blocks"]), _format_size(r["out_size"]),
                 f"{r['time']:.0f}s",
             )
+        elif r.get("status") == "skipped":
+            table.add_row(f"[dim]{r['name']}[/dim]", "—", "—", "—", "—", "[dim]SKIP[/dim]")
         else:
             table.add_row(f"[red]{r['name']}[/red]", "—", "—", "—", "—", "[red]FAIL[/red]")
 
