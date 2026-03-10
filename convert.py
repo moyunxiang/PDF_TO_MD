@@ -19,17 +19,79 @@ console = Console()
 PDF_DIR = Path("pdf")
 MARKDOWN_DIR = Path("markdown")
 
-# ── Performance: override marker defaults (MPS auto-detect is broken) ──
-# float16 halves memory → double batch sizes for better GPU utilization
-MARKER_CONFIG = {
-    "layout_batch_size": 24,
-    "detection_batch_size": 16,
-    "recognition_batch_size": 128,
-    "equation_batch_size": 32,
-    "table_rec_batch_size": 24,
-    "ocr_error_batch_size": 24,
-    "pdftext_workers": 1,
+# ── Performance: dynamic batch sizes based on system memory ──────
+# Base batch sizes calibrated for 16GB at "medium" tier.
+# Actual values = base × (system_memory / 16GB) × tier_multiplier.
+_BASE_BATCH = {
+    "layout_batch_size": 16,
+    "detection_batch_size": 8,
+    "recognition_batch_size": 64,
+    "equation_batch_size": 16,
+    "table_rec_batch_size": 12,
+    "ocr_error_batch_size": 12,
 }
+
+_TIER_MULT = {"low": 0.5, "medium": 1.0, "high": 1.5}
+
+
+def _get_total_memory_gb() -> float:
+    """Get total system memory in GB (no psutil needed)."""
+    import platform
+    import subprocess
+    try:
+        if platform.system() == "Darwin":
+            out = subprocess.check_output(["sysctl", "-n", "hw.memsize"], text=True)
+            return int(out.strip()) / (1024 ** 3)
+        else:
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemTotal"):
+                        return int(line.split()[1]) / (1024 ** 2)
+    except Exception:
+        pass
+    return 16  # safe fallback
+
+
+def _calc_batch_sizes(perf: str = "medium") -> dict:
+    """Calculate batch sizes based on system memory + performance tier."""
+    mem_gb = _get_total_memory_gb()
+    mem_factor = mem_gb / 16  # normalized to 16GB
+    tier_mult = _TIER_MULT[perf]
+    scale = mem_factor * tier_mult
+
+    config = {}
+    for key, base in _BASE_BATCH.items():
+        config[key] = max(2, int(base * scale))  # min 2 to avoid 0
+    config["pdftext_workers"] = 1
+    return config
+
+
+def ask_perf_mode() -> str:
+    """Select performance profile. Returns 'low'/'medium'/'high'."""
+    mem_gb = _get_total_memory_gb()
+    if mem_gb < 16:
+        default_idx = 0
+    elif mem_gb < 32:
+        default_idx = 1
+    else:
+        default_idx = 2
+
+    options = [
+        "🐢 Low — 系统流畅，慢",
+        f"⚡ Medium — 平衡 ({mem_gb:.0f}GB)",
+        "🚀 High — 最快，可能卡",
+    ]
+    idx = select_menu("Performance:", options)
+    if idx is None:
+        idx = default_idx
+    perf = ["low", "medium", "high"][idx]
+
+    batch = _calc_batch_sizes(perf)
+    console.print(f"  [dim]batch: recognition={batch['recognition_batch_size']}, "
+                  f"layout={batch['layout_batch_size']}, "
+                  f"detection={batch['detection_batch_size']}[/dim]")
+    return perf
+
 
 # Strip LLM processors (no LLM service configured, they just waste cycles)
 PROCESSORS = [
@@ -62,9 +124,23 @@ def _get_models():
     """Lazy-load marker ML models with float16 (cached after first call)."""
     global _models
     if _models is None:
+        # Lower process priority so system stays responsive
+        import os as _os
+        try:
+            _os.nice(10)
+        except OSError:
+            pass
+
+        # Cap MPS GPU memory at 70% to prevent system freeze
+        import torch
+        if torch.backends.mps.is_available():
+            try:
+                torch.mps.set_per_process_memory_fraction(0.7)
+            except Exception:
+                pass
+
         console.print("\n⏳ [bold]Loading ML models (float16)...[/bold]")
         load_start = time.time()
-        import torch
         from marker.models import create_model_dict
         _models = create_model_dict(dtype=torch.float16)
         console.print(f"  [dim]Models loaded in {time.time() - load_start:.1f}s[/dim]")
@@ -202,6 +278,7 @@ def select_menu(title: str, options: list[str]) -> int | None:
         menu_cursor="→ ",
         menu_cursor_style=("fg_cyan", "bold"),
         menu_highlight_style=("fg_cyan", "bold"),
+        clear_screen=False,
     )
     idx = menu.show()
     return idx
@@ -210,6 +287,7 @@ def select_menu(title: str, options: list[str]) -> int | None:
 def select_menu_multi(title: str, options: list[str]) -> list[int] | None:
     """Arrow-key multi-select menu. Space/Tab to toggle, Enter to confirm.
 
+    Uses clear_screen to show all options on full terminal.
     Returns list of selected indices, or None if cancelled.
     """
     from simple_term_menu import TerminalMenu
@@ -225,6 +303,7 @@ def select_menu_multi(title: str, options: list[str]) -> list[int] | None:
         multi_select_select_on_accept=True,
         show_multi_select_hint=True,
         show_multi_select_hint_text="(Space: toggle, Enter: confirm)",
+        clear_screen=False,
     )
     result = menu.show()
     if result is None:
@@ -374,9 +453,11 @@ def postprocess(text: str) -> tuple[str, dict]:
 
 # ── Conversion (marker library + postprocess, NO API) ───────────
 
-def _make_config(disable_ocr: bool = True) -> dict:
-    """Build marker config with OCR setting."""
-    return {**MARKER_CONFIG, "disable_ocr": disable_ocr}
+def _make_config(disable_ocr: bool = True, perf: str = "medium") -> dict:
+    """Build marker config with OCR + performance settings."""
+    config = _calc_batch_sizes(perf)
+    config["disable_ocr"] = disable_ocr
+    return config
 
 
 def convert_single(
@@ -385,6 +466,7 @@ def convert_single(
     index: int | None = None,
     total: int | None = None,
     disable_ocr: bool = True,
+    perf: str = "medium",
 ) -> dict:
     """Convert a single PDF to Markdown (marker + postprocess). Returns stats dict."""
     from marker.converters.pdf import PdfConverter
@@ -405,7 +487,7 @@ def convert_single(
 
     # Step 1: marker extraction (library API — shows tqdm per page)
     models = _get_models()
-    config = _make_config(disable_ocr=disable_ocr)
+    config = _make_config(disable_ocr=disable_ocr, perf=perf)
     converter = PdfConverter(artifact_dict=models, processor_list=PROCESSORS, config=config)
     rendered = converter(str(pdf_path))
 
@@ -582,7 +664,7 @@ def get_output_dir(pdf_path: Path) -> Path:
 
 # ── Batch Conversion ─────────────────────────────────────────────
 
-def convert_all(pdf_dir: Path, output_dir: Path = None, disable_ocr: bool = True):
+def convert_all(pdf_dir: Path, output_dir: Path = None, disable_ocr: bool = True, perf: str = "medium"):
     """Convert all PDFs in pdf_dir (including split subdirectories).
 
     Uses find_pdfs() to discover PDFs and determine output directories.
@@ -617,7 +699,7 @@ def convert_all(pdf_dir: Path, output_dir: Path = None, disable_ocr: bool = True
             try:
                 out_dir.mkdir(parents=True, exist_ok=True)
                 progress.stop()
-                stats = convert_single(pdf, out_dir, index=i, total=len(pdf_items), disable_ocr=disable_ocr)
+                stats = convert_single(pdf, out_dir, index=i, total=len(pdf_items), disable_ocr=disable_ocr, perf=perf)
                 results.append(stats)
                 progress.start()
                 progress.advance(task)

@@ -21,6 +21,7 @@ from convert import (
     convert_single,
     print_summary,
     ask_ocr_mode,
+    ask_perf_mode,
     find_pdfs,
     get_output_dir,
     _format_size,
@@ -100,7 +101,7 @@ def do_convert():
     # Show info
     scan = _scan_pdfs(selected)
     console.print(Panel(
-        f"📂 [bold]{len(selected)}[/bold] PDF{'s' if len(selected) > 1 else ''} "
+        f"�� [bold]{len(selected)}[/bold] PDF{'s' if len(selected) > 1 else ''} "
         f"({_format_size(scan['total_size'])})\n"
         f"📄 [yellow]{scan['total_pages']}[/yellow] pages total",
         title="[bold]PDF → Markdown[/bold]", border_style="blue",
@@ -109,13 +110,16 @@ def do_convert():
     # Ask OCR mode
     disable_ocr = ask_ocr_mode(selected[0])
 
+    # Ask performance mode
+    perf = ask_perf_mode()
+
     # Convert each selected PDF
     results = []
     total_start = time.time()
     for i, pdf in enumerate(selected, 1):
         out_dir = items_map.get(str(pdf), get_output_dir(pdf))
         out_dir.mkdir(parents=True, exist_ok=True)
-        stats = convert_single(pdf, out_dir, index=i, total=len(selected), disable_ocr=disable_ocr)
+        stats = convert_single(pdf, out_dir, index=i, total=len(selected), disable_ocr=disable_ocr, perf=perf)
         results.append(stats)
 
     print_summary(results, time.time() - total_start)
