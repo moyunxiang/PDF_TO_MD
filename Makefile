@@ -1,4 +1,4 @@
-.PHONY: run convert convert-one enhance split split-pages clean setup postprocess
+.PHONY: run convert enhance split split-pages clean setup postprocess
 
 VENV := .venv/bin/python
 
@@ -9,10 +9,6 @@ run:
 # Convert all PDFs (pure marker, no API) — auto-detects split subdirectories
 convert:
 	$(VENV) main.py convert
-
-# Convert a single PDF: make convert-one F=1.review-const.pdf
-convert-one:
-	$(VENV) main.py convert $(F)
 
 # Enhance converted MDs with API (independent step)
 enhance:

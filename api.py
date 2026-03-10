@@ -21,7 +21,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, MofNCompleteColumn, SpinnerColumn
 
-from convert import console, select_menu, _format_size
+from convert import console, select_menu, select_menu_multi, _format_size
 
 MARKDOWN_DIR = Path("markdown")
 ENHANCED_DIR = Path("enhanced")
@@ -49,53 +49,16 @@ MODE_SUFFIX = {"B": "cleanup", "C": "rewrite", "D": "outline"}
 
 # ── Prompts ──────────────────────────────────────────────────────
 
-PROMPT_B = """\
-You are a Markdown formatting assistant. Clean up the following lecture note Markdown:
+PROMPTS_FILE = Path(__file__).parent / "prompts.json"
 
-Rules:
-- Fix any formatting issues (broken tables, misaligned lists, inconsistent spacing)
-- Ensure code blocks have correct language tags (```cpp for C++, ```makefile for Makefile)
-- Standardize heading levels: # for slide titles, ## for subtitles only
-- Keep ALL content exactly as-is — do not add, remove, or rephrase any text
-- Keep image references as-is
-- Output ONLY the cleaned Markdown, no explanations
 
-Markdown to clean:
-"""
+def _load_prompts() -> dict[str, str]:
+    """Load prompts from prompts.json."""
+    import json
+    return json.loads(PROMPTS_FILE.read_text(encoding="utf-8"))
 
-PROMPT_C = """\
-You are an expert at creating clear, well-organized study notes from lecture slides.
-Rewrite the following lecture note Markdown into a polished study guide:
 
-Rules:
-- Reorganize content for logical flow (group related topics)
-- Use clear heading hierarchy: # for major topics, ## for subtopics, ### for details
-- Preserve ALL technical content, code examples, and formulas accurately
-- Improve clarity: add brief explanations where slides are terse
-- Format code blocks with correct language tags (```cpp for C++, ```makefile for Makefile)
-- Use tables, bullet points, and bold for key concepts
-- Keep image references as-is
-- Output ONLY the rewritten Markdown, no explanations
-
-Lecture notes to rewrite:
-"""
-
-PROMPT_D = """你是一位擅长双语教学的助教。请将以下英文课程讲义总结成一份**中文教学提纲**。
-
-格式要求：
-- 用中文写提纲骨架：标题、要点解释、过渡语、总结
-- 所有专业术语保留英文原文（如 inheritance、virtual function、polymorphism）
-- 代码块完整保留，不翻译，保持 ```cpp 标签
-- 数学公式保留原文
-- 用 # / ## / ### 组织层级，层级清晰
-- 每个知识点用 1-2 句中文说明"这是什么、为什么重要"
-- 在关键概念旁用 **加粗** 标注
-- 如有易混淆点，�� ⚠️ 提示
-- 结尾加一个「📝 本节要点回顾」小结（3-5 条）
-- 只输出提纲 Markdown，不要解释
-
-要总结的讲义：
-"""
+PROMPTS = _load_prompts()
 
 # ── Helpers ──────────────────────────────────────────────────────
 
@@ -172,7 +135,7 @@ def scan_md_sources() -> list[dict]:
 
         if item.is_dir():
             # Directory: look for .md files inside
-            md_files = sorted(item.glob("*.md"))
+            md_files = sorted(item.rglob("*.md"))
             if not md_files:
                 continue
             results.append(_scan_one(md_files, item.name, item, "dir"))
@@ -236,7 +199,7 @@ def call_api(text: str, mode: str, model_id: str, quiet: bool = False) -> tuple[
         api_key=os.environ.get("OPENROUTER_API_KEY", ""),
     )
 
-    prompt = {"B": PROMPT_B, "C": PROMPT_C, "D": PROMPT_D}[mode]
+    prompt = PROMPTS[mode]
     delays = [1, 2, 4, 8, 16, 32]
     last_err = None
 
@@ -368,7 +331,13 @@ def enhance_all(source: dict, output_target: Path, mode: str, model_id: str) -> 
     # Build (md, dst) task list
     tasks = []
     for md in md_files:
-        dst = output_target / md.name if source["type"] == "dir" else output_target
+        if source["type"] == "dir":
+            # Preserve relative path for nested structures
+            rel = md.relative_to(source["path"])
+            dst = output_target / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            dst = output_target
         tasks.append((md, dst))
 
     n = len(tasks)
@@ -525,7 +494,7 @@ def enhance_interactive():
         console.print(f"[dim]Or place .md files directly in {MARKDOWN_DIR}/[/dim]")
         return
 
-    # Select source (keep options short to avoid line-wrap breaking terminal menu)
+    # Build option strings (keep short to avoid line-wrap)
     options = []
     for s in sources:
         icon = "📁" if s["type"] == "dir" else "📄"
@@ -536,24 +505,48 @@ def enhance_interactive():
         options.append(
             f"{icon} {name}  ({n_files} files, {_format_size(s['total_size'])})"
         )
-    idx = select_menu("Select source to enhance:", options)
-    if idx is None:
-        console.print("[dim]Cancelled.[/dim]")
-        return
 
-    selected = sources[idx]
+    # Single or multi select?
+    if len(sources) > 1:
+        sel_mode = select_menu("Selection mode:", ["Single select", "Multi select (Space to toggle)"])
+        if sel_mode is None:
+            console.print("[dim]Cancelled.[/dim]")
+            return
+        use_multi = sel_mode == 1
+    else:
+        use_multi = False
+
+    # Select source(s)
+    if use_multi:
+        indices = select_menu_multi("Select sources to enhance:", options)
+        if not indices:
+            console.print("[dim]Cancelled.[/dim]")
+            return
+        selected_list = [sources[i] for i in indices]
+    else:
+        idx = select_menu("Select source to enhance:", options)
+        if idx is None:
+            console.print("[dim]Cancelled.[/dim]")
+            return
+        selected_list = [sources[idx]]
+
+    # Aggregate token estimates across all selected sources
+    total_est_b = sum(s["est_tokens_b"] for s in selected_list)
+    total_est_c = sum(s["est_tokens_c"] for s in selected_list)
+    total_est_d = sum(s["est_tokens_d"] for s in selected_list)
+    total_files = sum(len(s["md_files"]) for s in selected_list)
 
     # Select mode
-    mode = select_mode(est_b=selected["est_tokens_b"], est_c=selected["est_tokens_c"], est_d=selected["est_tokens_d"])
+    mode = select_mode(est_b=total_est_b, est_c=total_est_c, est_d=total_est_d)
     if mode is None:
         console.print("[dim]Cancelled.[/dim]")
         return
 
     # Show precise token estimate
     est_key = {"B": "est_tokens_b", "C": "est_tokens_c", "D": "est_tokens_d"}[mode]
-    est = selected[est_key]
+    total_est = sum(s[est_key] for s in selected_list)
     console.print(f"\n🔧 Mode [bold]{mode}[/bold] — {MODES[mode]}")
-    console.print(f"📊 Estimated tokens: [yellow bold]~{est:,}[/yellow bold]")
+    console.print(f"📊 Estimated tokens: [yellow bold]~{total_est:,}[/yellow bold]")
 
     # Select model
     result = select_model()
@@ -562,17 +555,17 @@ def enhance_interactive():
     model_id, model_name = result
     console.print(f"🤖 Model: [cyan]{model_name}[/cyan]")
 
-    # Determine output target (append mode suffix to avoid overwrite)
+    # Show plan
     suffix = MODE_SUFFIX[mode]
-    if selected["type"] == "dir":
-        output_target = ENHANCED_DIR / f"{selected['name']}_{suffix}"
-    else:
-        stem = Path(selected["name"]).stem
-        output_target = ENHANCED_DIR / f"{stem}_{suffix}.md"
-    console.print(f"📂 Output: [cyan]{output_target}[/cyan]")
-    n_files = len(selected["md_files"])
-    if n_files > 1:
-        console.print(f"⚡ Concurrency: [bold]{n_files} files in parallel[/bold]")
+    console.print(f"\n📋 [bold]{len(selected_list)} source{'s' if len(selected_list) > 1 else ''}, {total_files} files:[/bold]")
+    for s in selected_list:
+        if s["type"] == "dir":
+            out = ENHANCED_DIR / f"{s['name']}_{suffix}"
+        else:
+            out = ENHANCED_DIR / f"{Path(s['name']).stem}_{suffix}.md"
+        console.print(f"  {s['name']} → [cyan]{out}[/cyan]")
+    if total_files > 1:
+        console.print(f"⚡ Concurrency: [bold]{total_files} files in parallel[/bold]")
 
     # Confirm
     console.print()
@@ -585,13 +578,19 @@ def enhance_interactive():
         console.print("[dim]Cancelled.[/dim]")
         return
 
-    # Run enhancement
-    enhance_all(selected, output_target, mode, model_id)
+    # Run enhancement for each selected source
+    for s in selected_list:
+        if s["type"] == "dir":
+            output_target = ENHANCED_DIR / f"{s['name']}_{suffix}"
+        else:
+            output_target = ENHANCED_DIR / f"{Path(s['name']).stem}_{suffix}.md"
 
-    console.print(f"\n[bold]Enhanced output:[/bold] [cyan]{output_target}[/cyan]")
-    if selected["type"] == "dir":
-        for md in sorted(output_target.glob("*.md")):
-            console.print(f"  📄 {md.name}  ({_format_size(md.stat().st_size)})")
-    else:
-        if output_target.exists():
-            console.print(f"  📄 {output_target.name}  ({_format_size(output_target.stat().st_size)})")
+        enhance_all(s, output_target, mode, model_id)
+
+        console.print(f"\n[bold]Enhanced output:[/bold] [cyan]{output_target}[/cyan]")
+        if s["type"] == "dir":
+            for md in sorted(output_target.rglob("*.md")):
+                console.print(f"  📄 {md.name}  ({_format_size(md.stat().st_size)})")
+        else:
+            if output_target.exists():
+                console.print(f"  📄 {output_target.name}  ({_format_size(output_target.stat().st_size)})")

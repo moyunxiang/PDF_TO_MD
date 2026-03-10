@@ -25,9 +25,8 @@ make run
 
 What to do?
 > 1) Convert PDFs → Markdown
-  2) Convert single PDF
-  3) Split large PDF
-  4) Enhance Markdown with API
+  2) Split large PDF
+  3) Enhance Markdown with API
 ```
 
 ## 三步工作流
@@ -49,8 +48,7 @@ make split-pages F=textbook.pdf P=50  # 按页数拆分
 ### Step 2: 转换（纯本地，不花钱）
 
 ```bash
-make convert              # 批量转换所有 PDF（自动扫描子目录）
-make convert-one F=xxx.pdf  # 单文件转换
+make convert    # 进入转换（可选单个/多个/全部）
 ```
 
 marker 本地 ML 模型提取 PDF → Markdown + 自动后处理（代码块语言标记、标题规范化等）。
@@ -90,15 +88,14 @@ make enhance
 | qwen2.5-72b-instruct | 中文友好 |
 | gemini-3-flash-preview | Google 最新 |
 
-> 模型列表在 `models.json` 中配置，可随时增删。
+> 模型列表在 `models.json` 中配置，提示词在 `prompts.json` 中配置，均可随时修改。
 
 ## 命令一览
 
 | 命令 | 说明 |
 |---|---|
 | `make run` | **主入口** — 交互式主菜单 |
-| `make convert` | 批量转换（自动扫描子目录） |
-| `make convert-one F=xxx.pdf` | 单文件转换 |
+| `make convert` | 转换 PDF（支持单选/多选/全部） |
 | `make split F=xxx.pdf` | 拆分大 PDF → `pdf/{name}/` |
 | `make split-pages F=xxx.pdf P=50` | 按页数拆分 |
 | `make enhance` | API 增强已有 MD |
@@ -112,6 +109,8 @@ main.py      → 统一入口（主菜单 + CLI）
 convert.py   → 核心转换（marker + 后处理）
 api.py       → API 增强（独立步骤，OpenRouter）
 split.py     → 大 PDF 拆分（纯拆分，不转换）
+models.json  → API 模型配置（可增删）
+prompts.json → 提示词配置（可微调）
 pdf/         → 输入 PDF（拆分后的子目录也在这里）
 markdown/    → 纯净 Markdown（转换产��� + 可手动放入）
 enhanced/    → API 增强版 Markdown（按模式命名：*_cleanup / *_rewrite / *_outline）

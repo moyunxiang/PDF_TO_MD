@@ -207,6 +207,34 @@ def select_menu(title: str, options: list[str]) -> int | None:
     return idx
 
 
+def select_menu_multi(title: str, options: list[str]) -> list[int] | None:
+    """Arrow-key multi-select menu. Space/Tab to toggle, Enter to confirm.
+
+    Returns list of selected indices, or None if cancelled.
+    """
+    from simple_term_menu import TerminalMenu
+    menu = TerminalMenu(
+        options,
+        title=title,
+        menu_cursor="→ ",
+        menu_cursor_style=("fg_cyan", "bold"),
+        menu_highlight_style=("fg_cyan", "bold"),
+        multi_select=True,
+        multi_select_cursor="[✓] ",
+        multi_select_cursor_style=("fg_cyan", "bold"),
+        multi_select_select_on_accept=True,
+        show_multi_select_hint=True,
+        show_multi_select_hint_text="(Space: toggle, Enter: confirm)",
+    )
+    result = menu.show()
+    if result is None:
+        return None
+    # TerminalMenu returns tuple of indices for multi-select
+    if isinstance(result, int):
+        return [result]
+    return list(result)
+
+
 # ── Post-processing ──────────────────────────────────────────────
 
 _CPP_SIGNALS = re.compile(

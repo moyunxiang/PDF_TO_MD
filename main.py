@@ -17,8 +17,8 @@ from rich.panel import Panel
 from convert import (
     console,
     select_menu,
+    select_menu_multi,
     convert_single,
-    convert_all,
     print_summary,
     ask_ocr_mode,
     find_pdfs,
@@ -45,65 +45,80 @@ def _select_pdf(pdfs: list[Path]) -> Path | None:
     return pdfs[idx]
 
 
-def _show_info_panel(pdfs: list[Path], scan: dict):
-    """Display the info panel with PDF stats."""
-    info = (f"📂 [bold]{len(pdfs)}[/bold] PDFs in [cyan]{PDF_DIR}/[/cyan] "
-            f"({_format_size(scan['total_size'])})\n"
-            f"📄 [yellow]{scan['total_pages']}[/yellow] pages total")
-    console.print(Panel(info, title="[bold]PDF → Markdown[/bold]", border_style="blue"))
+def _select_pdfs_multi(pdfs: list[Path]) -> list[Path] | None:
+    """Let user pick multiple PDFs with Space/Tab to toggle."""
+    options = []
+    for p in pdfs:
+        try:
+            rel = p.relative_to(PDF_DIR)
+        except ValueError:
+            rel = p.name
+        options.append(f"{rel}  ({_format_size(p.stat().st_size)})")
+    indices = select_menu_multi("Select PDFs to convert:", options)
+    if not indices:
+        return None
+    return [pdfs[i] for i in indices]
 
 
 # ── Actions ──────────────────────────────────────────────────────
 
-def do_convert_all():
-    """Convert all PDFs in pdf/ (including split subdirectories)."""
+def do_convert():
+    """Convert PDFs → Markdown with single/multi/all select."""
+    import time
     pdf_items = find_pdfs(PDF_DIR)
     if not pdf_items:
         console.print(f"[red]No PDFs found in {PDF_DIR}/[/red]")
         return
 
     all_pdfs = [p for p, _ in pdf_items]
-    scan = _scan_pdfs(all_pdfs)
-    _show_info_panel(all_pdfs, scan)
+    items_map = {str(p): out for p, out in pdf_items}
 
-    # Ask OCR mode (use first PDF for auto-detect sampling)
-    disable_ocr = ask_ocr_mode(all_pdfs[0])
+    # Single or multi select?
+    if len(all_pdfs) > 1:
+        sel_mode = select_menu("Selection mode:", [
+            "Single select",
+            "Multi select (Space to toggle)",
+            "All",
+        ])
+        if sel_mode is None:
+            console.print("[dim]Cancelled.[/dim]")
+            return
+        if sel_mode == 0:
+            picked = _select_pdf(all_pdfs)
+            selected = [picked] if picked else None
+        elif sel_mode == 1:
+            selected = _select_pdfs_multi(all_pdfs)
+        else:
+            selected = all_pdfs
+    else:
+        selected = all_pdfs
 
-    convert_all(PDF_DIR, disable_ocr=disable_ocr)
-    console.print(f"\n[dim]💡 To enhance with API: make enhance[/dim]")
-
-
-def do_convert_single():
-    """Convert a single PDF."""
-    pdf_items = find_pdfs(PDF_DIR)
-    if not pdf_items:
-        console.print(f"[red]No PDFs found in {PDF_DIR}/[/red]")
-        return
-
-    all_pdfs = [p for p, _ in pdf_items]
-    pdf_path = _select_pdf(all_pdfs)
-    if pdf_path is None:
+    if not selected:
         console.print("[dim]Cancelled.[/dim]")
         return
 
-    scan = _scan_pdfs([pdf_path])
-    try:
-        rel = pdf_path.relative_to(PDF_DIR)
-    except ValueError:
-        rel = pdf_path.name
+    # Show info
+    scan = _scan_pdfs(selected)
     console.print(Panel(
-        f"📄 [cyan]{rel}[/cyan] ({_format_size(scan['total_size'])})\n"
-        f"📄 [yellow]{scan['total_pages']}[/yellow] pages",
+        f"📂 [bold]{len(selected)}[/bold] PDF{'s' if len(selected) > 1 else ''} "
+        f"({_format_size(scan['total_size'])})\n"
+        f"📄 [yellow]{scan['total_pages']}[/yellow] pages total",
         title="[bold]PDF → Markdown[/bold]", border_style="blue",
     ))
 
     # Ask OCR mode
-    disable_ocr = ask_ocr_mode(pdf_path)
+    disable_ocr = ask_ocr_mode(selected[0])
 
-    out_dir = get_output_dir(pdf_path)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    stats = convert_single(pdf_path, out_dir, index=1, total=1, disable_ocr=disable_ocr)
-    print_summary([stats], stats["time"])
+    # Convert each selected PDF
+    results = []
+    total_start = time.time()
+    for i, pdf in enumerate(selected, 1):
+        out_dir = items_map.get(str(pdf), get_output_dir(pdf))
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stats = convert_single(pdf, out_dir, index=i, total=len(selected), disable_ocr=disable_ocr)
+        results.append(stats)
+
+    print_summary(results, time.time() - total_start)
     console.print(f"\n[dim]💡 To enhance with API: make enhance[/dim]")
 
 
@@ -142,8 +157,7 @@ def do_split(pdf_name: str | None = None, pages: int | None = None):
 # ── Main Menu ────────────────────────────────────────────────────
 
 ACTIONS = [
-    ("Convert PDFs → Markdown",         do_convert_all),
-    ("Convert single PDF",              do_convert_single),
+    ("Convert PDFs → Markdown",         do_convert),
     ("Split large PDF",                 lambda: do_split()),
     ("Enhance Markdown with API",       do_enhance),
 ]
@@ -154,33 +168,7 @@ def main():
     if len(sys.argv) > 1:
         cmd = sys.argv[1].lower()
         if cmd == "convert":
-            if len(sys.argv) > 2:
-                # Single file shortcut
-                pdf_name = sys.argv[2]
-                pdf_path = Path(pdf_name)
-                if not pdf_path.exists():
-                    pdf_path = PDF_DIR / pdf_name
-                if not pdf_path.exists():
-                    console.print(f"[red bold]Error:[/red bold] {pdf_name} not found")
-                    sys.exit(1)
-                scan = _scan_pdfs([pdf_path])
-                try:
-                    rel = pdf_path.relative_to(PDF_DIR)
-                except ValueError:
-                    rel = pdf_path.name
-                console.print(Panel(
-                    f"📄 [cyan]{rel}[/cyan] ({_format_size(scan['total_size'])})\n"
-                    f"📄 [yellow]{scan['total_pages']}[/yellow] pages",
-                    title="[bold]PDF → Markdown[/bold]", border_style="blue",
-                ))
-                disable_ocr = ask_ocr_mode(pdf_path)
-                out_dir = get_output_dir(pdf_path)
-                out_dir.mkdir(parents=True, exist_ok=True)
-                stats = convert_single(pdf_path, out_dir, index=1, total=1, disable_ocr=disable_ocr)
-                print_summary([stats], stats["time"])
-                console.print(f"\n[dim]💡 To enhance with API: make enhance[/dim]")
-            else:
-                do_convert_all()
+            do_convert()
             return
         elif cmd == "enhance":
             do_enhance()
@@ -203,7 +191,12 @@ def main():
     if pdf_items:
         all_pdfs = [p for p, _ in pdf_items]
         scan = _scan_pdfs(all_pdfs)
-        _show_info_panel(all_pdfs, scan)
+        console.print(Panel(
+            f"📂 [bold]{len(all_pdfs)}[/bold] PDFs in [cyan]{PDF_DIR}/[/cyan] "
+            f"({_format_size(scan['total_size'])})\n"
+            f"📄 [yellow]{scan['total_pages']}[/yellow] pages total",
+            title="[bold]PDF → Markdown[/bold]", border_style="blue",
+        ))
     else:
         console.print(Panel(
             f"📂 [dim]No PDFs in {PDF_DIR}/[/dim]\n"
