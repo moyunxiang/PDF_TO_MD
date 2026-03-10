@@ -172,7 +172,13 @@ def _scan_pdfs(pdf_paths: list[Path]) -> dict:
 def select_menu(title: str, options: list[str]) -> int | None:
     """Arrow-key menu selection. Returns index or None if cancelled."""
     from simple_term_menu import TerminalMenu
-    menu = TerminalMenu(options, title=title)
+    menu = TerminalMenu(
+        options,
+        title=title,
+        menu_cursor="→ ",
+        menu_cursor_style=("fg_cyan", "bold"),
+        menu_highlight_style=("fg_cyan", "bold"),
+    )
     idx = menu.show()
     return idx
 

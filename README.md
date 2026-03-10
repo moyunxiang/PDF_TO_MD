@@ -70,7 +70,7 @@ make enhance
 - **全并发**：多文件自动并行调用 API（N 个文件 = N 并发）
 - **自动重试**：API 失败时指数退避重试（1s → 2s → 4s → ... → 32s）
 
-输出到 `enhanced/`（不覆盖原始 MD）。
+输出到 `enhanced/`，按模式命名（如 `enhanced/math2043_cleanup/`、`enhanced/math2043_outline/`），不覆盖原始 MD，不同模式互不覆盖。
 
 > **💡 也可以手动放 .md 文件到 `markdown/`**
 > 支持两种格式：`markdown/my-notes/xxx.md`（文件夹）或直接 `markdown/my-notes.md`（单文件），enhance 都能检测到。
@@ -86,6 +86,9 @@ make enhance
 | gpt-4o-mini | 快速便宜 |
 | deepseek-v3.2 | 性价比高 |
 | qwen2.5-72b-instruct | 中文友好 |
+| gemini-3-flash-preview | Google 最新 |
+
+> 模型列表在 `models.json` 中配置，可随时增删。
 
 ## 命令一览
 
@@ -109,5 +112,5 @@ api.py       → API 增强（独立步骤，OpenRouter）
 split.py     → 大 PDF 拆分（纯拆分，不转换）
 pdf/         → 输入 PDF（拆分后的子目录也在这里）
 markdown/    → 纯净 Markdown（转换产��� + 可手动放入）
-enhanced/    → API 增强版 Markdown
+enhanced/    → API 增强版 Markdown（按模式命名：*_cleanup / *_rewrite / *_outline）
 ```

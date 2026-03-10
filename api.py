@@ -45,6 +45,8 @@ MODES = {
     "D": "中文教学提纲 (Chinese outline, English terms)",
 }
 
+MODE_SUFFIX = {"B": "cleanup", "C": "rewrite", "D": "outline"}
+
 # ── Prompts ──────────────────────────────────────────────────────
 
 PROMPT_B = """\
@@ -523,28 +525,16 @@ def enhance_interactive():
         console.print(f"[dim]Or place .md files directly in {MARKDOWN_DIR}/[/dim]")
         return
 
-    # Show available sources
-    info_lines = []
-    for s in sources:
-        icon = "📁" if s["type"] == "dir" else "📄"
-        n_files = len(s["md_files"])
-        files_label = f"{n_files} file{'s' if n_files > 1 else ''}"
-        info_lines.append(
-            f"{icon} [cyan]{s['name']}{'/' if s['type'] == 'dir' else ''}[/cyan]  "
-            f"{files_label} · {s['total_lines']:,} lines · {_format_size(s['total_size'])}"
-        )
-    console.print(Panel("\n".join(info_lines), title="[bold]Available Markdown[/bold]", border_style="blue"))
-
-    # Select source
+    # Select source (keep options short to avoid line-wrap breaking terminal menu)
     options = []
     for s in sources:
         icon = "📁" if s["type"] == "dir" else "📄"
         n_files = len(s["md_files"])
-        files_label = f"{n_files} file{'s' if n_files > 1 else ''}"
+        name = s["name"]
+        if len(name) > 30:
+            name = name[:27] + "..."
         options.append(
-            f"{icon} {s['name']}{'/' if s['type'] == 'dir' else ''}  "
-            f"({files_label}, {_format_size(s['total_size'])}, "
-            f"~{s['est_tokens_b']:,}B / ~{s['est_tokens_c']:,}C tokens)"
+            f"{icon} {name}  ({n_files} files, {_format_size(s['total_size'])})"
         )
     idx = select_menu("Select source to enhance:", options)
     if idx is None:
@@ -572,11 +562,13 @@ def enhance_interactive():
     model_id, model_name = result
     console.print(f"🤖 Model: [cyan]{model_name}[/cyan]")
 
-    # Determine output target
+    # Determine output target (append mode suffix to avoid overwrite)
+    suffix = MODE_SUFFIX[mode]
     if selected["type"] == "dir":
-        output_target = ENHANCED_DIR / selected["name"]
+        output_target = ENHANCED_DIR / f"{selected['name']}_{suffix}"
     else:
-        output_target = ENHANCED_DIR / selected["name"]
+        stem = Path(selected["name"]).stem
+        output_target = ENHANCED_DIR / f"{stem}_{suffix}.md"
     console.print(f"📂 Output: [cyan]{output_target}[/cyan]")
     n_files = len(selected["md_files"])
     if n_files > 1:
