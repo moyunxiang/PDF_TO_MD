@@ -40,7 +40,7 @@ def _select_pdf(pdfs: list[Path]) -> Path | None:
         except ValueError:
             rel = p.name
         options.append(f"{rel}  ({_format_size(p.stat().st_size)})")
-    idx = select_menu("Select PDF:", options)
+    idx = select_menu("Select PDF:", options, show_back=True)
     if idx is None:
         return None
     return pdfs[idx]
@@ -64,7 +64,7 @@ def _select_pdfs_multi(pdfs: list[Path]) -> list[Path] | None:
 # ── Actions ──────────────────────────────────────────────────────
 
 def do_convert():
-    """Convert PDFs → Markdown with single/multi/all select."""
+    """Convert PDFs → Markdown with step-based navigation (← Back supported)."""
     import time
     pdf_items = find_pdfs(PDF_DIR)
     if not pdf_items:
@@ -74,56 +74,96 @@ def do_convert():
     all_pdfs = [p for p, _ in pdf_items]
     items_map = {str(p): out for p, out in pdf_items}
 
-    # Single or multi select?
-    if len(all_pdfs) > 1:
-        sel_mode = select_menu("Selection mode:", [
-            "Single select",
-            "Multi select (Space to toggle)",
-            "All",
-        ])
-        if sel_mode is None:
-            console.print("[dim]Cancelled.[/dim]")
+    # State variables
+    sel_mode = None   # 0=single, 1=multi, 2=all
+    selected = None
+    disable_ocr = None
+    perf = None
+
+    step = 0
+    while True:
+        # ── Step 0: Selection mode ───────────────────────────────
+        if step == 0:
+            if len(all_pdfs) <= 1:
+                # Only 1 PDF, skip selection
+                selected = all_pdfs
+                step = 2
+                continue
+
+            sel_mode = select_menu("Selection mode:", [
+                "Single select",
+                "Multi select (Space to toggle)",
+                "All",
+            ], show_back=True)
+
+            if sel_mode is None:
+                return  # back to main menu
+
+            if sel_mode == 2:  # All
+                selected = all_pdfs
+                step = 2
+            else:
+                step = 1
+            continue
+
+        # ── Step 1: Select PDF(s) ────────────────────────────────
+        elif step == 1:
+            if sel_mode == 0:
+                picked = _select_pdf(all_pdfs)
+                if picked is None:
+                    step = 0; continue
+                selected = [picked]
+            else:
+                picked = _select_pdfs_multi(all_pdfs)
+                if picked is None:
+                    step = 0; continue
+                selected = picked
+
+            step = 2
+            continue
+
+        # ── Step 2: Info panel + OCR mode ────────────────────────
+        elif step == 2:
+            scan = _scan_pdfs(selected)
+            console.print(Panel(
+                f"📚 [bold]{len(selected)}[/bold] PDF{'s' if len(selected) > 1 else ''} "
+                f"({_format_size(scan['total_size'])})\n"
+                f"📄 [yellow]{scan['total_pages']}[/yellow] pages total",
+                title="[bold]PDF → Markdown[/bold]", border_style="blue",
+            ))
+
+            result = ask_ocr_mode(selected[0])
+            if result is None:
+                if len(all_pdfs) <= 1:
+                    return  # only 1 PDF, back = main menu
+                step = 0; continue
+            disable_ocr = result
+            step = 3
+            continue
+
+        # ── Step 3: Performance mode ─────────────────────────────
+        elif step == 3:
+            result = ask_perf_mode()
+            if result is None:
+                step = 2; continue
+            perf = result
+            step = 4
+            continue
+
+        # ── Step 4: Execute conversion ───────────────────────────
+        elif step == 4:
+            results = []
+            total_start = time.time()
+            for i, pdf in enumerate(selected, 1):
+                out_dir = items_map.get(str(pdf), get_output_dir(pdf))
+                out_dir.mkdir(parents=True, exist_ok=True)
+                stats = convert_single(pdf, out_dir, index=i, total=len(selected),
+                                       disable_ocr=disable_ocr, perf=perf)
+                results.append(stats)
+
+            print_summary(results, time.time() - total_start)
+            console.print(f"\n[dim]💡 To enhance with API: make enhance[/dim]")
             return
-        if sel_mode == 0:
-            picked = _select_pdf(all_pdfs)
-            selected = [picked] if picked else None
-        elif sel_mode == 1:
-            selected = _select_pdfs_multi(all_pdfs)
-        else:
-            selected = all_pdfs
-    else:
-        selected = all_pdfs
-
-    if not selected:
-        console.print("[dim]Cancelled.[/dim]")
-        return
-
-    # Show info
-    scan = _scan_pdfs(selected)
-    console.print(Panel(
-        f"�� [bold]{len(selected)}[/bold] PDF{'s' if len(selected) > 1 else ''} "
-        f"({_format_size(scan['total_size'])})\n"
-        f"📄 [yellow]{scan['total_pages']}[/yellow] pages total",
-        title="[bold]PDF → Markdown[/bold]", border_style="blue",
-    ))
-
-    # Ask OCR mode
-    disable_ocr = ask_ocr_mode(selected[0])
-
-    # Ask performance mode
-    perf = ask_perf_mode()
-
-    # Convert each selected PDF
-    results = []
-    total_start = time.time()
-    for i, pdf in enumerate(selected, 1):
-        out_dir = items_map.get(str(pdf), get_output_dir(pdf))
-        out_dir.mkdir(parents=True, exist_ok=True)
-        stats = convert_single(pdf, out_dir, index=i, total=len(selected), disable_ocr=disable_ocr, perf=perf)
-        results.append(stats)
-
-    print_summary(results, time.time() - total_start)
-    console.print(f"\n[dim]💡 To enhance with API: make enhance[/dim]")
 
 
 def do_enhance():
@@ -148,8 +188,7 @@ def do_split(pdf_name: str | None = None, pages: int | None = None):
             return
         pdf_path = _select_pdf(pdfs)
         if pdf_path is None:
-            console.print("[dim]Cancelled.[/dim]")
-            return
+            return  # back to main menu
 
     if not pdf_path.exists():
         console.print(f"[red bold]Error:[/red bold] {pdf_path} not found")
@@ -190,34 +229,36 @@ def main():
             do_split(pdf_name, pages)
             return
 
-    # Interactive main menu
-    pdf_items = find_pdfs(PDF_DIR)
-    if pdf_items:
-        all_pdfs = [p for p, _ in pdf_items]
-        scan = _scan_pdfs(all_pdfs)
-        console.print(Panel(
-            f"📂 [bold]{len(all_pdfs)}[/bold] PDFs in [cyan]{PDF_DIR}/[/cyan] "
-            f"({_format_size(scan['total_size'])})\n"
-            f"📄 [yellow]{scan['total_pages']}[/yellow] pages total",
-            title="[bold]PDF → Markdown[/bold]", border_style="blue",
-        ))
-    else:
-        console.print(Panel(
-            f"📂 [dim]No PDFs in {PDF_DIR}/[/dim]\n"
-            f"[dim]Add PDF files to get started[/dim]",
-            title="[bold]PDF → Markdown[/bold]", border_style="blue",
-        ))
+    # Interactive main menu (loops until Escape)
+    while True:
+        pdf_items = find_pdfs(PDF_DIR)
+        if pdf_items:
+            all_pdfs = [p for p, _ in pdf_items]
+            scan = _scan_pdfs(all_pdfs)
+            console.print(Panel(
+                f"📂 [bold]{len(all_pdfs)}[/bold] PDFs in [cyan]{PDF_DIR}/[/cyan] "
+                f"({_format_size(scan['total_size'])})\n"
+                f"📄 [yellow]{scan['total_pages']}[/yellow] pages total",
+                title="[bold]PDF → Markdown[/bold]", border_style="blue",
+            ))
+        else:
+            console.print(Panel(
+                f"📂 [dim]No PDFs in {PDF_DIR}/[/dim]\n"
+                f"[dim]Add PDF files to get started[/dim]",
+                title="[bold]PDF → Markdown[/bold]", border_style="blue",
+            ))
 
-    console.print()
-    options = [f"{i+1}) {name}" for i, (name, _) in enumerate(ACTIONS)]
-    idx = select_menu("What to do?", options)
-    if idx is None:
-        console.print("[dim]Cancelled.[/dim]")
-        sys.exit(0)
+        console.print()
+        options = [f"{i+1}) {name}" for i, (name, _) in enumerate(ACTIONS)]
+        idx = select_menu("What to do?", options)
+        if idx is None:
+            console.print("[dim]Bye! 👋[/dim]")
+            break
 
-    console.print()
-    _, action = ACTIONS[idx]
-    action()
+        console.print()
+        _, action = ACTIONS[idx]
+        action()
+        console.print()  # spacing before next loop
 
 
 if __name__ == "__main__":

@@ -81,9 +81,9 @@ def ask_perf_mode() -> str:
         f"⚡ Medium — 平衡 ({mem_gb:.0f}GB)",
         "🚀 High — 最快，可能卡",
     ]
-    idx = select_menu("Performance:", options)
+    idx = select_menu("Performance:", options, show_back=True)
     if idx is None:
-        idx = default_idx
+        return None  # back
     perf = ["low", "medium", "high"][idx]
 
     batch = _calc_batch_sizes(perf)
@@ -185,10 +185,9 @@ def ask_ocr_mode(pdf_path: Path) -> bool:
         "Auto-detect (sample pages to decide)",
         "Off — skip OCR (fastest for text PDFs)",
     ]
-    idx = select_menu("OCR mode:", options)
+    idx = select_menu("OCR mode:", options, show_back=True)
     if idx is None:
-        # Default: auto-detect
-        idx = 0
+        return None  # back
 
     if idx == 1:
         # Force off
@@ -269,11 +268,18 @@ def _scan_pdfs(pdf_paths: list[Path]) -> dict:
 
 # ── Interactive Menu ─────────────────────────────────────────────
 
-def select_menu(title: str, options: list[str]) -> int | None:
-    """Arrow-key menu selection. Returns index or None if cancelled."""
+def select_menu(title: str, options: list[str], show_back: bool = False) -> int | None:
+    """Arrow-key menu selection. Returns index or None if cancelled/back.
+
+    If show_back=True, appends '← Back' option at the bottom.
+    Selecting it (or pressing Escape) returns None.
+    """
     from simple_term_menu import TerminalMenu
+    display = list(options)
+    if show_back:
+        display.append("← Back")
     menu = TerminalMenu(
-        options,
+        display,
         title=title,
         menu_cursor="→ ",
         menu_cursor_style=("fg_cyan", "bold"),
@@ -281,6 +287,10 @@ def select_menu(title: str, options: list[str]) -> int | None:
         clear_screen=False,
     )
     idx = menu.show()
+    if idx is None:
+        return None
+    if show_back and idx == len(options):
+        return None  # '← Back' selected
     return idx
 
 

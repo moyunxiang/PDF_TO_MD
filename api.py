@@ -192,26 +192,23 @@ def scan_single_dir(md_dir: Path) -> dict:
 
 
 def select_mode(est_cleanup: int = 0, est_rewrite: int = 0, est_study: int = 0) -> str | None:
-    """Select enhancement mode. Returns mode string or None."""
+    """Select enhancement mode. Returns mode string or None (back)."""
     opt_cleanup = f"Cleanup — 格式整理      (~{est_cleanup:,} tokens)" if est_cleanup else "Cleanup — 格式整理"
     opt_rewrite = f"Rewrite — 理解重写      (~{est_rewrite:,} tokens)" if est_rewrite else "Rewrite — 理解重写"
     opt_study   = f"Study — 中文学习笔记    (~{est_study:,} tokens)" if est_study else "Study — 中文学习笔记"
-    idx = select_menu("Enhancement mode:", [opt_cleanup, opt_rewrite, opt_study])
+    idx = select_menu("Enhancement mode:", [opt_cleanup, opt_rewrite, opt_study], show_back=True)
     if idx is None:
         return None
     return ["cleanup", "rewrite", "study"][idx]
 
 
 def select_model() -> tuple[str, str] | None:
-    """Select API model. Returns (model_id, model_name) or None."""
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if not api_key:
-        console.print("\n[red bold]✗ OPENROUTER_API_KEY not set.[/red bold]")
-        console.print("  Export it first:  [cyan]export OPENROUTER_API_KEY=sk-or-...[/cyan]")
-        return None
+    """Select API model. Returns (model_id, model_name) or None (back).
 
+    Note: caller should check OPENROUTER_API_KEY before calling this.
+    """
     options = [f"{i+1}) {m.split('/')[-1]}" for i, m in enumerate(MODELS)]
-    idx = select_menu("Select model:", options)
+    idx = select_menu("Select model:", options, show_back=True)
     if idx is None:
         return None
 
@@ -565,7 +562,22 @@ def _print_enhance_summary(results: list[dict], total_elapsed: float, mode: str)
 # ── Interactive Enhance Flow ─────────────────────────────────────
 
 def enhance_interactive():
-    """Full interactive flow: scan markdown/ → select → mode → model → enhance."""
+    """Full interactive flow with step-based navigation (← Back supported).
+
+    Steps:
+      0: Selection mode (single/multi) — only if >1 source
+      1: Select source(s)
+      2: Enhancement mode
+      3: Select model
+      4: Confirm plan
+      5: Execute enhancement
+    """
+    # Check API key upfront
+    if not os.environ.get("OPENROUTER_API_KEY"):
+        console.print("\n[red bold]✗ OPENROUTER_API_KEY not set.[/red bold]")
+        console.print("  Export it first:  [cyan]export OPENROUTER_API_KEY=sk-or-...[/cyan]")
+        return
+
     sources = scan_md_sources()
 
     if not sources:
@@ -574,7 +586,7 @@ def enhance_interactive():
         console.print(f"[dim]Or place .md files directly in {MARKDOWN_DIR}/[/dim]")
         return
 
-    # Build option strings (keep short to avoid line-wrap)
+    # Build option strings
     options = []
     for s in sources:
         icon = "📁" if s["type"] == "dir" else "📄"
@@ -586,92 +598,132 @@ def enhance_interactive():
             f"{icon} {name}  ({n_files} files, {_format_size(s['total_size'])})"
         )
 
-    # Single or multi select?
-    if len(sources) > 1:
-        sel_mode = select_menu("Selection mode:", ["Single select", "Multi select (Space to toggle)"])
-        if sel_mode is None:
-            console.print("[dim]Cancelled.[/dim]")
+    # State variables
+    use_multi = False
+    selected_list = None
+    mode = None
+    model_id = None
+    model_name = None
+
+    step = 0
+    while True:
+        # ── Step 0: Selection mode ───────────────────────────────
+        if step == 0:
+            if len(sources) <= 1:
+                use_multi = False
+                step = 1
+                continue
+
+            sel = select_menu("Selection mode:", [
+                "Single select",
+                "Multi select (Space to toggle)",
+            ], show_back=True)
+
+            if sel is None:
+                return  # back to main menu
+            use_multi = sel == 1
+            step = 1
+            continue
+
+        # ── Step 1: Select source(s) ─────────────────────────────
+        elif step == 1:
+            if use_multi:
+                indices = select_menu_multi("Select sources to enhance:", options)
+                if not indices:
+                    if len(sources) <= 1:
+                        return  # only 1 source, back = main menu
+                    step = 0; continue
+                selected_list = [sources[i] for i in indices]
+            else:
+                idx = select_menu("Select source to enhance:", options, show_back=True)
+                if idx is None:
+                    if len(sources) <= 1:
+                        return
+                    step = 0; continue
+                selected_list = [sources[idx]]
+
+            step = 2
+            continue
+
+        # ── Step 2: Enhancement mode ─────────────────────────────
+        elif step == 2:
+            total_est_cleanup = sum(s["est_tokens_cleanup"] for s in selected_list)
+            total_est_rewrite = sum(s["est_tokens_rewrite"] for s in selected_list)
+            total_est_study = sum(s["est_tokens_study"] for s in selected_list)
+
+            mode = select_mode(
+                est_cleanup=total_est_cleanup,
+                est_rewrite=total_est_rewrite,
+                est_study=total_est_study,
+            )
+            if mode is None:
+                step = 1; continue
+
+            # Show mode info
+            est_key = f"est_tokens_{mode}"
+            total_est = sum(s[est_key] for s in selected_list)
+            console.print(f"\n🔧 Mode [bold]{mode}[/bold] — {MODES[mode]}")
+            console.print(f"📊 Estimated tokens: [yellow bold]~{total_est:,}[/yellow bold]")
+
+            step = 3
+            continue
+
+        # ── Step 3: Select model ─────────────────────────────────
+        elif step == 3:
+            result = select_model()
+            if result is None:
+                step = 2; continue
+            model_id, model_name = result
+            console.print(f"🤖 Model: [cyan]{model_name}[/cyan]")
+
+            step = 4
+            continue
+
+        # ── Step 4: Confirm plan ─────────────────────────────────
+        elif step == 4:
+            total_files = sum(len(s["md_files"]) for s in selected_list)
+            console.print(f"\n📋 [bold]{len(selected_list)} source{'s' if len(selected_list) > 1 else ''}, {total_files} files:[/bold]")
+            for s in selected_list:
+                if s["type"] == "dir":
+                    out = ENHANCED_DIR / s["name"]
+                    console.print(f"  {s['name']}/ → [cyan]{out}/[/cyan]  (files: *_{mode}.md)")
+                else:
+                    stem = Path(s["name"]).stem
+                    out = ENHANCED_DIR / f"{stem}_{mode}.md"
+                    console.print(f"  {s['name']} → [cyan]{out}[/cyan]")
+            if total_files > 1:
+                console.print(f"⚡ Concurrency: [bold]{total_files} files in parallel[/bold]")
+
+            console.print()
+            try:
+                confirm = input("Proceed? [Y/n/b(ack)]: ").strip().lower()
+                if confirm in ("b", "back"):
+                    step = 3; continue
+                if confirm and confirm not in ("y", "yes", ""):
+                    console.print("[dim]Cancelled.[/dim]")
+                    return
+            except (EOFError, KeyboardInterrupt):
+                console.print("[dim]Cancelled.[/dim]")
+                return
+
+            step = 5
+            continue
+
+        # ── Step 5: Execute enhancement ──────────────────────────
+        elif step == 5:
+            for s in selected_list:
+                if s["type"] == "dir":
+                    output_dir = ENHANCED_DIR / s["name"]
+                else:
+                    output_dir = ENHANCED_DIR / f"{Path(s['name']).stem}_{mode}.md"
+
+                enhance_all(s, output_dir, mode, model_id)
+
+                console.print(f"\n[bold]Enhanced output:[/bold] [cyan]{output_dir}[/cyan]")
+                if s["type"] == "dir":
+                    for md in sorted(output_dir.rglob("*.md")):
+                        console.print(f"  📄 {md.name}  ({_format_size(md.stat().st_size)})")
+                else:
+                    if output_dir.exists():
+                        console.print(f"  📄 {output_dir.name}  ({_format_size(output_dir.stat().st_size)})")
             return
-        use_multi = sel_mode == 1
-    else:
-        use_multi = False
-
-    # Select source(s)
-    if use_multi:
-        indices = select_menu_multi("Select sources to enhance:", options)
-        if not indices:
-            console.print("[dim]Cancelled.[/dim]")
-            return
-        selected_list = [sources[i] for i in indices]
-    else:
-        idx = select_menu("Select source to enhance:", options)
-        if idx is None:
-            console.print("[dim]Cancelled.[/dim]")
-            return
-        selected_list = [sources[idx]]
-
-    # Aggregate token estimates across all selected sources
-    total_est_cleanup = sum(s["est_tokens_cleanup"] for s in selected_list)
-    total_est_rewrite = sum(s["est_tokens_rewrite"] for s in selected_list)
-    total_est_study = sum(s["est_tokens_study"] for s in selected_list)
-    total_files = sum(len(s["md_files"]) for s in selected_list)
-
-    # Select mode
-    mode = select_mode(est_cleanup=total_est_cleanup, est_rewrite=total_est_rewrite, est_study=total_est_study)
-    if mode is None:
-        console.print("[dim]Cancelled.[/dim]")
-        return
-
-    # Show precise token estimate
-    est_key = f"est_tokens_{mode}"
-    total_est = sum(s[est_key] for s in selected_list)
-    console.print(f"\n🔧 Mode [bold]{mode}[/bold] — {MODES[mode]}")
-    console.print(f"📊 Estimated tokens: [yellow bold]~{total_est:,}[/yellow bold]")
-
-    # Select model
-    result = select_model()
-    if result is None:
-        return
-    model_id, model_name = result
-    console.print(f"🤖 Model: [cyan]{model_name}[/cyan]")
-
-    # Show plan — folder keeps original name, files get _mode suffix
-    console.print(f"\n📋 [bold]{len(selected_list)} source{'s' if len(selected_list) > 1 else ''}, {total_files} files:[/bold]")
-    for s in selected_list:
-        if s["type"] == "dir":
-            out = ENHANCED_DIR / s["name"]
-            console.print(f"  {s['name']}/ → [cyan]{out}/[/cyan]  (files: *_{mode}.md)")
-        else:
-            stem = Path(s["name"]).stem
-            out = ENHANCED_DIR / f"{stem}_{mode}.md"
-            console.print(f"  {s['name']} → [cyan]{out}[/cyan]")
-    if total_files > 1:
-        console.print(f"⚡ Concurrency: [bold]{total_files} files in parallel[/bold]")
-
-    # Confirm
-    console.print()
-    try:
-        confirm = input("Proceed? [Y/n]: ").strip().lower()
-        if confirm and confirm != "y":
-            console.print("[dim]Cancelled.[/dim]")
-            return
-    except (EOFError, KeyboardInterrupt):
-        console.print("[dim]Cancelled.[/dim]")
-        return
-
-    # Run enhancement for each selected source
-    for s in selected_list:
-        if s["type"] == "dir":
-            output_dir = ENHANCED_DIR / s["name"]
-        else:
-            output_dir = ENHANCED_DIR / f"{Path(s['name']).stem}_{mode}.md"
-
-        enhance_all(s, output_dir, mode, model_id)
-
-        console.print(f"\n[bold]Enhanced output:[/bold] [cyan]{output_dir}[/cyan]")
-        if s["type"] == "dir":
-            for md in sorted(output_dir.rglob("*.md")):
-                console.print(f"  📄 {md.name}  ({_format_size(md.stat().st_size)})")
-        else:
-            if output_dir.exists():
-                console.print(f"  📄 {output_dir.name}  ({_format_size(output_dir.stat().st_size)})")

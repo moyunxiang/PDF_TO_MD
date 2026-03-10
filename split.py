@@ -175,10 +175,9 @@ def split_pdf(pdf_path: Path, pages_per_chunk: int | None = None):
             options.append(f"A) By bookmarks ({len(toc)} chapters)")
         options.append("B) By page count")
 
-        idx = select_menu("Split method:", options)
+        idx = select_menu("Split method:", options, show_back=True)
         if idx is None:
-            console.print("[dim]Cancelled.[/dim]")
-            sys.exit(0)
+            return  # back to main menu
 
         if toc and idx == 0:
             method = "toc"
