@@ -16,12 +16,11 @@ import sys
 import time
 from pathlib import Path
 
-from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, MofNCompleteColumn, SpinnerColumn
 
-console = Console()
+from convert import console, select_menu, _format_size
 
 MARKDOWN_DIR = Path("markdown")
 ENHANCED_DIR = Path("enhanced")
@@ -100,16 +99,6 @@ def estimate_tokens(text: str, mode: str = "B") -> dict:
     }
 
 
-def _format_size(nbytes: int) -> str:
-    """Human-readable file size."""
-    if nbytes < 1024:
-        return f"{nbytes} B"
-    elif nbytes < 1024 * 1024:
-        return f"{nbytes / 1024:.1f} KB"
-    else:
-        return f"{nbytes / (1024 * 1024):.1f} MB"
-
-
 # ── Scan MD Sources ──────────────────────────────────────────────
 
 def _scan_one(md_files: list[Path], name: str, path: Path, source_type: str) -> dict:
@@ -173,12 +162,6 @@ def scan_single_dir(md_dir: Path) -> dict:
 
 
 # ── Interactive Selection ────────────────────────────────────────
-
-def select_menu(title: str, options: list[str]) -> int | None:
-    """Arrow-key menu selection. Returns index or None."""
-    from simple_term_menu import TerminalMenu
-    menu = TerminalMenu(options, title=title)
-    return menu.show()
 
 
 def select_mode(est_b: int = 0, est_c: int = 0) -> str | None:
