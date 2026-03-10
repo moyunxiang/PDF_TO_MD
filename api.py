@@ -40,12 +40,10 @@ def _load_models() -> list[str]:
 MODELS = _load_models()
 
 MODES = {
-    "B": "Format cleanup (keep content, fix formatting)",
-    "C": "Understand + rewrite (reorganize into study guide)",
-    "D": "中文教学提纲 (Chinese outline, English terms)",
+    "cleanup": "Format cleanup (keep content, fix formatting)",
+    "rewrite": "Understand + rewrite (reorganize into study guide)",
+    "study": "中文学习笔记 (Chinese study notes, English terms)",
 }
-
-MODE_SUFFIX = {"B": "cleanup", "C": "rewrite", "D": "outline"}
 
 # ── Prompts ──────────────────────────────────────────────────────
 
@@ -67,7 +65,7 @@ def empty_usage() -> dict:
     return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
 
-def estimate_tokens(text: str, mode: str = "B") -> dict:
+def estimate_tokens(text: str, mode: str = "cleanup") -> dict:
     """Estimate token usage from actual MD content.
 
     Returns dict with prompt_tokens, completion_tokens, total_tokens estimates.
@@ -75,12 +73,13 @@ def estimate_tokens(text: str, mode: str = "B") -> dict:
     """
     # ~4 chars per token for English text
     prompt_tokens = max(1, len(text) // 4)
-    # Mode B: output ≈ input (just reformatting)
-    # Mode C: output ≈ 1.2× input (rewrite adds some)
-    if mode == "C":
+    # cleanup: output ≈ input (just reformatting)
+    # rewrite: output ≈ 1.2× input (rewrite adds some)
+    # study: output ≈ 1.5× input (detailed Chinese notes are longer than outline)
+    if mode == "rewrite":
         completion_tokens = int(prompt_tokens * 1.2)
-    elif mode == "D":
-        completion_tokens = int(prompt_tokens * 0.6)
+    elif mode == "study":
+        completion_tokens = int(prompt_tokens * 1.5)
     else:
         completion_tokens = prompt_tokens
     return {
@@ -88,6 +87,42 @@ def estimate_tokens(text: str, mode: str = "B") -> dict:
         "completion_tokens": completion_tokens,
         "total_tokens": prompt_tokens + completion_tokens,
     }
+
+
+def _calc_dst(md: Path, source: dict, output_dir: Path, mode: str) -> Path:
+    """Calculate destination path for an enhanced MD file.
+
+    Naming: original stem + _mode + .md
+      - markdown/a.md       → enhanced/a_study.md
+      - markdown/b/c.md     → enhanced/b/c_study.md
+      - markdown/b/sub/d.md → enhanced/b/sub/d_study.md
+
+    Folder structure is preserved, only filenames get the mode suffix.
+    """
+    if source["type"] == "file":
+        # Single file: output_dir is already the full target path
+        return output_dir
+    else:
+        # Dir type: preserve relative path, rename file
+        rel = md.relative_to(source["path"])
+        new_name = f"{rel.stem}_{mode}.md"
+        return output_dir / rel.parent / new_name
+
+
+def _next_version(path: Path) -> Path:
+    """Find next available version number for a path.
+
+    c_study.md → c_study_1.md → c_study_2.md → ...
+    """
+    stem = path.stem    # e.g. "c_study"
+    suffix = path.suffix  # ".md"
+    parent = path.parent
+    n = 1
+    while True:
+        candidate = parent / f"{stem}_{n}{suffix}"
+        if not candidate.exists():
+            return candidate
+        n += 1
 
 
 # ── Scan MD Sources ──────────────────────────────────────────────
@@ -110,9 +145,9 @@ def _scan_one(md_files: list[Path], name: str, path: Path, source_type: str) -> 
         "md_files": md_files,
         "total_lines": total_lines,
         "total_size": total_size,
-        "est_tokens_b": estimate_tokens("x" * total_chars, "B")["total_tokens"],
-        "est_tokens_c": estimate_tokens("x" * total_chars, "C")["total_tokens"],
-        "est_tokens_d": estimate_tokens("x" * total_chars, "D")["total_tokens"],
+        "est_tokens_cleanup": estimate_tokens("x" * total_chars, "cleanup")["total_tokens"],
+        "est_tokens_rewrite": estimate_tokens("x" * total_chars, "rewrite")["total_tokens"],
+        "est_tokens_study": estimate_tokens("x" * total_chars, "study")["total_tokens"],
     }
 
 
@@ -156,15 +191,15 @@ def scan_single_dir(md_dir: Path) -> dict:
 # ── Interactive Selection ────────────────────────────────────────
 
 
-def select_mode(est_b: int = 0, est_c: int = 0, est_d: int = 0) -> str | None:
-    """Select enhancement mode B, C, or D. Returns mode string or None."""
-    opt_b = f"B) Format cleanup         (~{est_b:,} tokens)" if est_b else "B) Format cleanup"
-    opt_c = f"C) Understand + rewrite   (~{est_c:,} tokens)" if est_c else "C) Understand + rewrite"
-    opt_d = f"D) 中文教学提纲            (~{est_d:,} tokens)" if est_d else "D) 中文教学提纲"
-    idx = select_menu("Enhancement mode:", [opt_b, opt_c, opt_d])
+def select_mode(est_cleanup: int = 0, est_rewrite: int = 0, est_study: int = 0) -> str | None:
+    """Select enhancement mode. Returns mode string or None."""
+    opt_cleanup = f"Cleanup — 格式整理      (~{est_cleanup:,} tokens)" if est_cleanup else "Cleanup — 格式整理"
+    opt_rewrite = f"Rewrite — 理解重写      (~{est_rewrite:,} tokens)" if est_rewrite else "Rewrite — 理解重写"
+    opt_study   = f"Study — 中文学习笔记    (~{est_study:,} tokens)" if est_study else "Study — 中文学习笔记"
+    idx = select_menu("Enhancement mode:", [opt_cleanup, opt_rewrite, opt_study])
     if idx is None:
         return None
-    return ["B", "C", "D"][idx]
+    return ["cleanup", "rewrite", "study"][idx]
 
 
 def select_model() -> tuple[str, str] | None:
@@ -211,7 +246,7 @@ def call_api(text: str, mode: str, model_id: str, quiet: bool = False) -> tuple[
                     {"role": "system", "content": prompt},
                     {"role": "user", "content": text},
                 ],
-                temperature=0.1 if mode == "B" else 0.3,
+                temperature=0.1 if mode == "cleanup" else 0.3,
             )
 
             usage = empty_usage()
@@ -301,7 +336,7 @@ def _enhance_one(md: Path, dst: Path, mode: str, model_id: str) -> dict:
     elapsed = time.time() - start
     dst.write_text(enhanced_text, encoding="utf-8")
     return {
-        "name": md.name,
+        "name": dst.name,
         "status": "ok",
         "src_size": md.stat().st_size,
         "dst_size": dst.stat().st_size,
@@ -310,38 +345,71 @@ def _enhance_one(md: Path, dst: Path, mode: str, model_id: str) -> dict:
     }
 
 
-def enhance_all(source: dict, output_target: Path, mode: str, model_id: str) -> list[dict]:
-    """Enhance all MDs from a source, save to output_target.
+def _resolve_conflicts(tasks: list[tuple[Path, Path]]) -> tuple[list[tuple[Path, Path]], list[dict]]:
+    """Check for existing files and ask user per-conflict.
 
-    All files are processed concurrently via ThreadPoolExecutor.
-    source: dict from scan_md_sources() with type, md_files, path, etc.
-    output_target: for type="dir" → a directory; for type="file" → a file path.
+    Returns (resolved_tasks, skipped_results).
+    For each conflict, user chooses:
+      - New version → rename to c_study_1.md, c_study_2.md, ...
+      - Skip → add to skipped list
+    """
+    resolved = []
+    skipped = []
+
+    for md, dst in tasks:
+        if dst.exists():
+            next_ver = _next_version(dst)
+            choice = select_menu(
+                f"⚠️  {dst.name} already exists:",
+                [f"New version → {next_ver.name}", "Skip"],
+            )
+            if choice is None or choice == 1:
+                # Skip
+                console.print(f"  [dim]⏭ {md.name} skipped[/dim]")
+                skipped.append({"name": md.name, "status": "skipped"})
+                continue
+            else:
+                # New version
+                dst = next_ver
+                console.print(f"  [dim]→ {dst.name}[/dim]")
+
+        resolved.append((md, dst))
+
+    return resolved, skipped
+
+
+def enhance_all(source: dict, output_dir: Path, mode: str, model_id: str) -> list[dict]:
+    """Enhance all MDs from a source, save to output_dir.
+
+    Naming: files get _mode suffix, folders keep original name.
+      - markdown/a.md       → enhanced/a_study.md
+      - markdown/b/c.md     → enhanced/b/c_study.md
+
+    If target exists, asks per-file: new version or skip.
+    Non-skipped files are processed concurrently via ThreadPoolExecutor.
     """
     md_files = source["md_files"]
     if not md_files:
         console.print(f"[red]No MD files in source.[/red]")
         return []
 
-    # Prepare output location
-    if source["type"] == "dir":
-        output_target.mkdir(parents=True, exist_ok=True)
-    else:
-        output_target.parent.mkdir(parents=True, exist_ok=True)
-
     # Build (md, dst) task list
-    tasks = []
+    raw_tasks = []
     for md in md_files:
-        if source["type"] == "dir":
-            # Preserve relative path for nested structures
-            rel = md.relative_to(source["path"])
-            dst = output_target / rel
-            dst.parent.mkdir(parents=True, exist_ok=True)
-        else:
-            dst = output_target
-        tasks.append((md, dst))
+        dst = _calc_dst(md, source, output_dir, mode)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        raw_tasks.append((md, dst))
+
+    # Resolve conflicts (ask user per-file)
+    tasks, skipped = _resolve_conflicts(raw_tasks)
+
+    if not tasks:
+        if skipped:
+            console.print(f"[dim]All {len(skipped)} files skipped.[/dim]")
+        return skipped
 
     n = len(tasks)
-    results = []
+    results = list(skipped)  # start with skipped entries
     total_start = time.time()
 
     if n == 1:
@@ -362,13 +430,13 @@ def enhance_all(source: dict, output_target: Path, mode: str, model_id: str) -> 
                           f"[yellow bold]{usage['total_tokens']:,}[/yellow bold]")
             console.print(f"  └ [green]saved:[/green]  {dst}  [dim]{api_time:.1f}s[/dim]")
             results.append({
-                "name": md.name, "status": "ok",
+                "name": dst.name, "status": "ok",
                 "src_size": md.stat().st_size, "dst_size": dst.stat().st_size,
                 "usage": usage, "time": api_time,
             })
         except Exception as e:
             console.print(f"  [red]✗ Error: {e}[/red]")
-            results.append({"name": md.name, "status": "error", "error": str(e)})
+            results.append({"name": dst.name, "status": "error", "error": str(e)})
     else:
         # Multiple files: full concurrency via ThreadPoolExecutor
         console.print(f"\n[bold]⚡ {n} files in parallel[/bold]")
@@ -384,24 +452,25 @@ def enhance_all(source: dict, output_target: Path, mode: str, model_id: str) -> 
             transient=False,
         ) as progress:
             ptask = progress.add_task(
-                f"[bold]Enhancing {n} files (Mode {mode})[/bold]",
+                f"[bold]Enhancing {n} files ({mode})[/bold]",
                 total=n,
             )
 
-            future_to_md = {}
+            future_to_info = {}
             with ThreadPoolExecutor(max_workers=n) as executor:
                 for md, dst in tasks:
                     future = executor.submit(_enhance_one, md, dst, mode, model_id)
-                    future_to_md[future] = md
+                    future_to_info[future] = (md, dst)
 
-                for future in as_completed(future_to_md):
-                    md = future_to_md[future]
+                done_count = 0
+                for future in as_completed(future_to_info):
+                    md, dst = future_to_info[future]
                     try:
                         result = future.result()
                         progress.stop()
-                        done = len(results) + 1
+                        done_count += 1
                         console.print(
-                            f"  [green]✓[/green] [{done}/{n}] [cyan]{result['name']}[/cyan]  "
+                            f"  [green]✓[/green] [{done_count}/{n}] [cyan]{result['name']}[/cyan]  "
                             f"[yellow]{result['usage']['total_tokens']:,}[/yellow] tokens  "
                             f"[dim]{result['time']:.1f}s[/dim]"
                         )
@@ -409,8 +478,8 @@ def enhance_all(source: dict, output_target: Path, mode: str, model_id: str) -> 
                         progress.start()
                     except Exception as e:
                         progress.stop()
-                        console.print(f"  [red]✗ {md.name}: {e}[/red]")
-                        results.append({"name": md.name, "status": "error", "error": str(e)})
+                        console.print(f"  [red]✗ {dst.name}: {e}[/red]")
+                        results.append({"name": dst.name, "status": "error", "error": str(e)})
                         progress.start()
                     progress.advance(ptask)
 
@@ -420,8 +489,11 @@ def enhance_all(source: dict, output_target: Path, mode: str, model_id: str) -> 
     # Copy images from source dir to enhanced dir (only for dir type)
     if source["type"] == "dir":
         src_dir = source["path"]
-        for img in list(src_dir.glob("*.jpeg")) + list(src_dir.glob("*.png")):
-            shutil.copy2(img, output_target / img.name)
+        for img in list(src_dir.rglob("*.jpeg")) + list(src_dir.rglob("*.png")):
+            rel = img.relative_to(src_dir)
+            img_dst = output_dir / rel
+            img_dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(img, img_dst)
 
     return results
 
@@ -429,7 +501,8 @@ def enhance_all(source: dict, output_target: Path, mode: str, model_id: str) -> 
 def _print_enhance_summary(results: list[dict], total_elapsed: float, mode: str):
     """Print summary table for enhancement results."""
     ok = [r for r in results if r.get("status") == "ok"]
-    fail = [r for r in results if r.get("status") != "ok"]
+    skipped = [r for r in results if r.get("status") == "skipped"]
+    fail = [r for r in results if r.get("status") not in ("ok", "skipped")]
 
     total_usage = empty_usage()
     for r in ok:
@@ -437,18 +510,23 @@ def _print_enhance_summary(results: list[dict], total_elapsed: float, mode: str)
             total_usage[k] += r.get("usage", {}).get(k, 0)
 
     status_text = f"[green bold]✅ {len(ok)}/{len(results)} enhanced[/green bold]"
+    if skipped:
+        status_text += f"  [dim]⏭ {len(skipped)} skipped[/dim]"
     if fail:
         status_text += f"  [red bold]❌ {len(fail)} failed[/red bold]"
 
     panel_lines = [
         status_text + f"   [dim]⏱ {total_elapsed:.0f}s total[/dim]",
-        f"🔢 Tokens: [yellow]{total_usage['prompt_tokens']:,}[/yellow] prompt + "
-        f"[yellow]{total_usage['completion_tokens']:,}[/yellow] completion = "
-        f"[yellow bold]{total_usage['total_tokens']:,}[/yellow bold] total",
     ]
+    if ok:
+        panel_lines.append(
+            f"🔢 Tokens: [yellow]{total_usage['prompt_tokens']:,}[/yellow] prompt + "
+            f"[yellow]{total_usage['completion_tokens']:,}[/yellow] completion = "
+            f"[yellow bold]{total_usage['total_tokens']:,}[/yellow bold] total"
+        )
 
     console.print()
-    console.print(Panel("\n".join(panel_lines), title=f"[bold]Enhancement Summary (Mode {mode})[/bold]", border_style="green"))
+    console.print(Panel("\n".join(panel_lines), title=f"[bold]Enhancement Summary ({mode})[/bold]", border_style="green"))
 
     table = Table(show_header=True, header_style="bold", border_style="dim")
     table.add_column("File", style="cyan", min_width=28)
@@ -466,6 +544,8 @@ def _print_enhance_summary(results: list[dict], total_elapsed: float, mode: str)
                 f"{r['usage']['total_tokens']:,}",
                 f"{r['time']:.0f}s",
             )
+        elif r.get("status") == "skipped":
+            table.add_row(f"[dim]{r['name']}[/dim]", "—", "—", "—", "[dim]SKIP[/dim]")
         else:
             table.add_row(f"[red]{r['name']}[/red]", "—", "—", "—", "[red]FAIL[/red]")
 
@@ -531,19 +611,19 @@ def enhance_interactive():
         selected_list = [sources[idx]]
 
     # Aggregate token estimates across all selected sources
-    total_est_b = sum(s["est_tokens_b"] for s in selected_list)
-    total_est_c = sum(s["est_tokens_c"] for s in selected_list)
-    total_est_d = sum(s["est_tokens_d"] for s in selected_list)
+    total_est_cleanup = sum(s["est_tokens_cleanup"] for s in selected_list)
+    total_est_rewrite = sum(s["est_tokens_rewrite"] for s in selected_list)
+    total_est_study = sum(s["est_tokens_study"] for s in selected_list)
     total_files = sum(len(s["md_files"]) for s in selected_list)
 
     # Select mode
-    mode = select_mode(est_b=total_est_b, est_c=total_est_c, est_d=total_est_d)
+    mode = select_mode(est_cleanup=total_est_cleanup, est_rewrite=total_est_rewrite, est_study=total_est_study)
     if mode is None:
         console.print("[dim]Cancelled.[/dim]")
         return
 
     # Show precise token estimate
-    est_key = {"B": "est_tokens_b", "C": "est_tokens_c", "D": "est_tokens_d"}[mode]
+    est_key = f"est_tokens_{mode}"
     total_est = sum(s[est_key] for s in selected_list)
     console.print(f"\n🔧 Mode [bold]{mode}[/bold] — {MODES[mode]}")
     console.print(f"📊 Estimated tokens: [yellow bold]~{total_est:,}[/yellow bold]")
@@ -555,15 +635,16 @@ def enhance_interactive():
     model_id, model_name = result
     console.print(f"🤖 Model: [cyan]{model_name}[/cyan]")
 
-    # Show plan
-    suffix = MODE_SUFFIX[mode]
+    # Show plan — folder keeps original name, files get _mode suffix
     console.print(f"\n📋 [bold]{len(selected_list)} source{'s' if len(selected_list) > 1 else ''}, {total_files} files:[/bold]")
     for s in selected_list:
         if s["type"] == "dir":
-            out = ENHANCED_DIR / f"{s['name']}_{suffix}"
+            out = ENHANCED_DIR / s["name"]
+            console.print(f"  {s['name']}/ → [cyan]{out}/[/cyan]  (files: *_{mode}.md)")
         else:
-            out = ENHANCED_DIR / f"{Path(s['name']).stem}_{suffix}.md"
-        console.print(f"  {s['name']} → [cyan]{out}[/cyan]")
+            stem = Path(s["name"]).stem
+            out = ENHANCED_DIR / f"{stem}_{mode}.md"
+            console.print(f"  {s['name']} → [cyan]{out}[/cyan]")
     if total_files > 1:
         console.print(f"⚡ Concurrency: [bold]{total_files} files in parallel[/bold]")
 
@@ -581,16 +662,16 @@ def enhance_interactive():
     # Run enhancement for each selected source
     for s in selected_list:
         if s["type"] == "dir":
-            output_target = ENHANCED_DIR / f"{s['name']}_{suffix}"
+            output_dir = ENHANCED_DIR / s["name"]
         else:
-            output_target = ENHANCED_DIR / f"{Path(s['name']).stem}_{suffix}.md"
+            output_dir = ENHANCED_DIR / f"{Path(s['name']).stem}_{mode}.md"
 
-        enhance_all(s, output_target, mode, model_id)
+        enhance_all(s, output_dir, mode, model_id)
 
-        console.print(f"\n[bold]Enhanced output:[/bold] [cyan]{output_target}[/cyan]")
+        console.print(f"\n[bold]Enhanced output:[/bold] [cyan]{output_dir}[/cyan]")
         if s["type"] == "dir":
-            for md in sorted(output_target.rglob("*.md")):
+            for md in sorted(output_dir.rglob("*.md")):
                 console.print(f"  📄 {md.name}  ({_format_size(md.stat().st_size)})")
         else:
-            if output_target.exists():
-                console.print(f"  📄 {output_target.name}  ({_format_size(output_target.stat().st_size)})")
+            if output_dir.exists():
+                console.print(f"  📄 {output_dir.name}  ({_format_size(output_dir.stat().st_size)})")

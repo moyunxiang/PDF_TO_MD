@@ -53,7 +53,7 @@ make convert    # 进入转换（可选单个/多个/全部）
 
 marker 本地 ML 模型提取 PDF → Markdown + 自动后处理（代码块语言标记、标题规范化等）。
 
-> **性能优化**：float16 半精度推理 + 加大 batch size + 砍掉无用 LLM 处理器，比默认配置快 1.5-2x。
+> **性能自适应**：batch size 根据系统内存动态计算，转换前可选 Low/Medium/High 三档平衡速度与流畅性。float16 半精度 + 砍掉无用 LLM 处理器。
 
 > **智能扫描**：如果 `pdf/textbook/` 下有拆分 PDF，会自动转换这些章节（跳过原件 `pdf/textbook.pdf`）。
 
@@ -70,16 +70,16 @@ make enhance
 - **全并发**：多文件自动并行调用 API（N 个文件 = N 并发）
 - **自动重试**：API 失败时指数退避重试（1s → 2s → 4s → ... → 32s）
 
-输出到 `enhanced/`，按模式命名（如 `enhanced/math2043_cleanup/`、`enhanced/math2043_outline/`），不覆盖原始 MD，不同模式互不覆盖。
+输出到 `enhanced/`，按模式命名（如 `enhanced/math2043_cleanup/`、`enhanced/math2043_study/`），不覆盖原始 MD，不同模式互不覆盖。
 
 > **💡 也可以手动放 .md 文件到 `markdown/`**
 > 支持两种格式：`markdown/my-notes/xxx.md`（文件夹）或直接 `markdown/my-notes.md`（单文件），enhance 都能检测到。
 
 | 模式 | 说明 |
 |---|---|
-| **B** | 格式整理（保持内容不变，修复排版） |
-| **C** | 理解重写（重组为学习笔记） |
-| **D** | 中文教学提纲（中文骨架 + 英文术语/代码） |
+| **cleanup** | 格式整理（保持内容不变，修复排版） |
+| **rewrite** | 理解重写（重组为英文学习笔记） |
+| **study** | 中文学习笔记（详细中文讲解 + 英文术语/代码，可直接用于学习） |
 
 | 模型（OpenRouter） | 特点 |
 |---|---|
@@ -106,12 +106,12 @@ make enhance
 
 ```
 main.py      → 统一入口（主菜单 + CLI）
-convert.py   → 核心转换（marker + 后处理）
+convert.py   → 核心转换（marker + 后处理 + 动态 batch size）
 api.py       → API 增强（独立步骤，OpenRouter）
 split.py     → 大 PDF 拆分（纯拆分，不转换）
 models.json  → API 模型配置（可增删）
-prompts.json → 提示词配置（可微调）
+prompts.json → 提示词配置（cleanup/rewrite/study，可微调）
 pdf/         → 输入 PDF（拆分后的子目录也在这里）
-markdown/    → 纯净 Markdown（转换产��� + 可手动放入）
-enhanced/    → API 增强版 Markdown（按模式命名：*_cleanup / *_rewrite / *_outline）
+markdown/    → 纯净 Markdown（转换产出 + 可手动放入）
+enhanced/    → API 增强版 Markdown（按模式命名：*_cleanup / *_rewrite / *_study）
 ```
