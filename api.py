@@ -88,13 +88,15 @@ MODES = {
 
 # ── Prompts ──────────────────────────────────────────────────────
 
-PROMPTS_FILE = Path(__file__).parent / "prompts.json"
+PROMPTS_DIR = Path(__file__).parent / "prompts"
 
 
 def _load_prompts() -> dict[str, str]:
-    """Load prompts from prompts.json."""
-    import json
-    return json.loads(PROMPTS_FILE.read_text(encoding="utf-8"))
+    """Load prompts from prompts/*.txt (one file per mode)."""
+    prompts = {}
+    for f in sorted(PROMPTS_DIR.glob("*.txt")):
+        prompts[f.stem] = f.read_text(encoding="utf-8")
+    return prompts
 
 
 PROMPTS = _load_prompts()

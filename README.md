@@ -106,7 +106,7 @@ make enhance
 | qwen2.5-72b-instruct | 中文友好 |
 | gemini-3-flash-preview | Google 最新 |
 
-> 模型列表在 `models.json` 中配置，提示词在 `prompts.json` 中配置，均可随时修改。
+> 模型列表在 `models.json` 中配置，提示词在 `prompts/` 目录中配置（每个模式一个 .txt 文件），均可随时修改。
 
 ## 命令一览
 
@@ -128,7 +128,7 @@ api.py           → API 增强（独立步骤，OpenRouter + 费用估算）
 split.py         → 大 PDF 拆分（纯拆分，不转换）
 models.json      → 增强模型配置（id + 价格）
 pdf_models.json  → PDF 转换模型配置（支持 vision/PDF 输入）
-prompts.json     → 提示词配置（cleanup/rewrite/study/tutorial/convert）
+prompts/         → 提示词目录（每个模式一个 .txt，可直接编辑）
 setup.bat        → Windows 安装脚本
 run.bat          → Windows 运行脚本
 pdf/             → 输入 PDF
