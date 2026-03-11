@@ -64,7 +64,12 @@ def _select_pdfs_multi(pdfs: list[Path]) -> list[Path] | None:
 # ── Actions ──────────────────────────────────────────────────────
 
 def do_convert():
-    """Convert PDFs → Markdown with step-based navigation (← Back supported)."""
+    """Convert PDFs → Markdown with step-based navigation (← Back supported).
+
+    Supports two conversion methods:
+      - Local model (marker-pdf): fast, offline, no API cost
+      - API (vision model): send page images to LLM, get structured MD back
+    """
     import time
     pdf_items = find_pdfs(PDF_DIR)
     if not pdf_items:
@@ -75,19 +80,41 @@ def do_convert():
     items_map = {str(p): out for p, out in pdf_items}
 
     # State variables
-    sel_mode = None   # 0=single, 1=multi, 2=all
+    convert_method = None  # "local" or "api"
+    sel_mode = None        # 0=single, 1=multi, 2=all
     selected = None
     disable_ocr = None
     perf = None
+    # API-specific state
+    api_model_id = None
+    api_model_name = None
+    api_input_method = "pdf"
+    batch_size = 30
 
     step = 0
     while True:
-        # ── Step 0: Selection mode ───────────────────────────────
+        # ── Step 0: Conversion method ────────────────────────────
         if step == 0:
+            method_idx = select_menu("Conversion method:", [
+                "🖥️  Local model (marker-pdf, offline)",
+                "☁️  API (vision model, send to LLM)",
+            ], show_back=True)
+
+            if method_idx is None:
+                return  # back to main menu
+
+            convert_method = "local" if method_idx == 0 else "api"
+            step = 1
+            continue
+
+        # ── Step 1: Selection mode ───────────────────────────────
+        elif step == 1:
             if len(all_pdfs) <= 1:
-                # Only 1 PDF, skip selection
                 selected = all_pdfs
-                step = 2
+                if convert_method == "local":
+                    step = 3  # skip to OCR
+                else:
+                    step = 5  # skip to API model selection
                 continue
 
             sel_mode = select_menu("Selection mode:", [
@@ -97,61 +124,132 @@ def do_convert():
             ], show_back=True)
 
             if sel_mode is None:
-                return  # back to main menu
+                step = 0; continue
 
             if sel_mode == 2:  # All
                 selected = all_pdfs
-                step = 2
+                if convert_method == "local":
+                    step = 3  # skip to OCR
+                else:
+                    step = 5  # skip to API model
+                continue
             else:
-                step = 1
+                step = 2
             continue
 
-        # ── Step 1: Select PDF(s) ────────────────────────────────
-        elif step == 1:
+        # ── Step 2: Select PDF(s) ────────────────────────────────
+        elif step == 2:
             if sel_mode == 0:
                 picked = _select_pdf(all_pdfs)
                 if picked is None:
-                    step = 0; continue
+                    step = 1; continue
                 selected = [picked]
             else:
                 picked = _select_pdfs_multi(all_pdfs)
                 if picked is None:
-                    step = 0; continue
+                    step = 1; continue
                 selected = picked
 
-            step = 2
+            if convert_method == "local":
+                step = 3
+            else:
+                step = 5  # API model
             continue
 
-        # ── Step 2: Info panel + OCR mode ────────────────────────
-        elif step == 2:
+        # ── Step 3: Info panel + OCR mode (local only) ───────────
+        elif step == 3:
             scan = _scan_pdfs(selected)
             console.print(Panel(
                 f"📚 [bold]{len(selected)}[/bold] PDF{'s' if len(selected) > 1 else ''} "
                 f"({_format_size(scan['total_size'])})\n"
                 f"📄 [yellow]{scan['total_pages']}[/yellow] pages total",
-                title="[bold]PDF → Markdown[/bold]", border_style="blue",
+                title="[bold]PDF → Markdown (Local)[/bold]", border_style="blue",
             ))
 
             result = ask_ocr_mode(selected[0])
             if result is None:
-                if len(all_pdfs) <= 1:
-                    return  # only 1 PDF, back = main menu
-                step = 0; continue
+                step = 1; continue
             disable_ocr = result
-            step = 3
-            continue
-
-        # ── Step 3: Performance mode ─────────────────────────────
-        elif step == 3:
-            result = ask_perf_mode()
-            if result is None:
-                step = 2; continue
-            perf = result
             step = 4
             continue
 
-        # ── Step 4: Execute conversion ───────────────────────────
+        # ── Step 4: Performance mode (local only) ────────────────
         elif step == 4:
+            result = ask_perf_mode()
+            if result is None:
+                step = 3; continue
+            perf = result
+            step = 10  # → execute local
+            continue
+
+        # ── Step 5: Select model (API only) ─────────────────────
+        elif step == 5:
+            import os
+            if not os.environ.get("OPENROUTER_API_KEY"):
+                console.print("\n[red bold]✗ OPENROUTER_API_KEY not set.[/red bold]")
+                console.print("  Export it first:  [cyan]export OPENROUTER_API_KEY=sk-or-...[/cyan]")
+                step = 0; continue
+
+            scan = _scan_pdfs(selected)
+            console.print(Panel(
+                f"📚 [bold]{len(selected)}[/bold] PDF{'s' if len(selected) > 1 else ''} "
+                f"({_format_size(scan['total_size'])})\n"
+                f"📄 [yellow]{scan['total_pages']}[/yellow] pages total",
+                title="[bold]PDF → Markdown (API)[/bold]", border_style="green",
+            ))
+
+            from api import select_pdf_model, estimate_cost, format_cost
+
+            # Rough token estimate: ~800 prompt + ~400 completion per page
+            est_prompt = scan["total_pages"] * 800
+            est_completion = scan["total_pages"] * 400
+
+            result = select_pdf_model(est_prompt=est_prompt, est_completion=est_completion)
+            if result is None:
+                step = 1; continue
+            api_model_id, api_model_name = result
+
+            est_cost = estimate_cost(est_prompt, est_completion, api_model_id)
+            console.print(f"  🤖 [cyan]{api_model_name}[/cyan]  💰 ~[yellow]{format_cost(est_cost)}[/yellow]")
+
+            step = 6
+            continue
+
+        # ── Step 6: Input method + confirm (API only) ────────────
+        elif step == 6:
+            method_idx = select_menu("Input method:", [
+                "📄 PDF direct (faster, fewer tokens, recommended)",
+                "🖼️  Render to images (fallback if PDF fails)",
+            ], show_back=True)
+
+            if method_idx is None:
+                step = 5; continue
+
+            api_input_method = "pdf" if method_idx == 0 else "image"
+            batch_size = 30 if api_input_method == "pdf" else 10
+            method_label = "PDF direct" if api_input_method == "pdf" else "render to images"
+
+            console.print(f"  📨 Input: [bold]{method_label}[/bold]")
+            console.print(f"  📄 Pages per batch: [yellow]{batch_size}[/yellow]")
+            console.print()
+
+            # Confirm
+            try:
+                confirm = input("Proceed? [Y/n/b(ack)]: ").strip().lower()
+                if confirm in ("b", "back"):
+                    step = 6; continue  # re-show input method
+                if confirm and confirm not in ("y", "yes", ""):
+                    console.print("[dim]Cancelled.[/dim]")
+                    return
+            except (EOFError, KeyboardInterrupt):
+                console.print("[dim]Cancelled.[/dim]")
+                return
+
+            step = 11  # → execute API
+            continue
+
+        # ── Step 10: Execute local conversion ────────────────────
+        elif step == 10:
             results = []
             total_start = time.time()
             for i, pdf in enumerate(selected, 1):
@@ -160,6 +258,31 @@ def do_convert():
                 stats = convert_single(pdf, out_dir, index=i, total=len(selected),
                                        disable_ocr=disable_ocr, perf=perf)
                 results.append(stats)
+
+            print_summary(results, time.time() - total_start)
+            console.print(f"\n[dim]💡 To enhance with API: make enhance[/dim]")
+            return
+
+        # ── Step 11: Execute API conversion ──────────────────────
+        elif step == 11:
+            from api import convert_pdf_via_api
+            results = []
+            total_start = time.time()
+
+            for i, pdf in enumerate(selected, 1):
+                out_dir = items_map.get(str(pdf), get_output_dir(pdf))
+                out_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    stats = convert_pdf_via_api(
+                        pdf, out_dir, api_model_id,
+                        input_method=api_input_method,
+                        pages_per_batch=batch_size,
+                        index=i, total=len(selected),
+                    )
+                    results.append(stats)
+                except Exception as e:
+                    console.print(f"  [red]✗ {pdf.name}: {e}[/red]")
+                    results.append({"name": pdf.name, "status": "error", "error": str(e)})
 
             print_summary(results, time.time() - total_start)
             console.print(f"\n[dim]💡 To enhance with API: make enhance[/dim]")

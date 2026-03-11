@@ -31,18 +31,59 @@ ENHANCED_DIR = Path("enhanced")
 MODELS_FILE = Path(__file__).parent / "models.json"
 
 
-def _load_models() -> list[str]:
-    """Load model IDs from models.json."""
+def _load_models() -> list[dict]:
+    """Load models from models.json. Each: {id, input, output}."""
     import json
     return json.loads(MODELS_FILE.read_text(encoding="utf-8"))
 
 
 MODELS = _load_models()
 
+PDF_MODELS_FILE = Path(__file__).parent / "pdf_models.json"
+
+
+def _load_pdf_models() -> list[str]:
+    """Load model for PDF conversion IDs from pdf_models.json."""
+    import json
+    return json.loads(PDF_MODELS_FILE.read_text(encoding="utf-8"))
+
+
+PDF_MODELS = _load_pdf_models()
+
+
+# ── Pricing ──────────────────────────────────────────────────────
+
+# Combined pricing lookup: model_id → (input_price, output_price) per 1M tokens
+MODEL_PRICING: dict[str, tuple[float, float]] = {}
+for _m in MODELS + PDF_MODELS:
+    MODEL_PRICING[_m["id"]] = (_m["input"], _m["output"])
+
+
+def estimate_cost(prompt_tokens: int, completion_tokens: int, model_id: str) -> float:
+    """Estimate cost in USD given token counts and model ID.
+
+    Prices are per 1M tokens from models.json / pdf_models.json.
+    Returns 0.0 if model not found in pricing table.
+    """
+    inp_price, out_price = MODEL_PRICING.get(model_id, (0, 0))
+    return (prompt_tokens * inp_price + completion_tokens * out_price) / 1_000_000
+
+
+def format_cost(cost: float) -> str:
+    """Format a USD cost for display."""
+    if cost < 0.01:
+        return f"${cost:.4f}"
+    elif cost < 1.0:
+        return f"${cost:.3f}"
+    else:
+        return f"${cost:.2f}"
+
+
 MODES = {
     "cleanup": "Format cleanup (keep content, fix formatting)",
     "rewrite": "Understand + rewrite (reorganize into study guide)",
-    "study": "中文学习笔记 (Chinese study notes, English terms)",
+    "study": "中文复习笔记 (review notes, concise)",
+    "tutorial": "中文详细教程 (deep tutorial, every point explained)",
 }
 
 # ── Prompts ──────────────────────────────────────────────────────
@@ -75,11 +116,14 @@ def estimate_tokens(text: str, mode: str = "cleanup") -> dict:
     prompt_tokens = max(1, len(text) // 4)
     # cleanup: output ≈ input (just reformatting)
     # rewrite: output ≈ 1.2× input (rewrite adds some)
-    # study: output ≈ 1.5× input (detailed Chinese notes are longer than outline)
+    # study: output ≈ 1.5× input (Chinese review notes)
+    # tutorial: output ≈ 2.5× input (deep tutorial, every point + every problem explained)
     if mode == "rewrite":
         completion_tokens = int(prompt_tokens * 1.2)
     elif mode == "study":
         completion_tokens = int(prompt_tokens * 1.5)
+    elif mode == "tutorial":
+        completion_tokens = int(prompt_tokens * 2.5)
     else:
         completion_tokens = prompt_tokens
     return {
@@ -148,6 +192,7 @@ def _scan_one(md_files: list[Path], name: str, path: Path, source_type: str) -> 
         "est_tokens_cleanup": estimate_tokens("x" * total_chars, "cleanup")["total_tokens"],
         "est_tokens_rewrite": estimate_tokens("x" * total_chars, "rewrite")["total_tokens"],
         "est_tokens_study": estimate_tokens("x" * total_chars, "study")["total_tokens"],
+        "est_tokens_tutorial": estimate_tokens("x" * total_chars, "tutorial")["total_tokens"],
     }
 
 
@@ -191,28 +236,37 @@ def scan_single_dir(md_dir: Path) -> dict:
 # ── Interactive Selection ────────────────────────────────────────
 
 
-def select_mode(est_cleanup: int = 0, est_rewrite: int = 0, est_study: int = 0) -> str | None:
+def select_mode(est_cleanup: int = 0, est_rewrite: int = 0, est_study: int = 0, est_tutorial: int = 0) -> str | None:
     """Select enhancement mode. Returns mode string or None (back)."""
-    opt_cleanup = f"Cleanup — 格式整理      (~{est_cleanup:,} tokens)" if est_cleanup else "Cleanup — 格式整理"
-    opt_rewrite = f"Rewrite — 理解重写      (~{est_rewrite:,} tokens)" if est_rewrite else "Rewrite — 理解重写"
-    opt_study   = f"Study — 中文学习笔记    (~{est_study:,} tokens)" if est_study else "Study — 中文学习笔记"
-    idx = select_menu("Enhancement mode:", [opt_cleanup, opt_rewrite, opt_study], show_back=True)
+    opt_cleanup  = f"Cleanup — 格式整理        (~{est_cleanup:,} tokens)" if est_cleanup else "Cleanup — 格式整理"
+    opt_rewrite  = f"Rewrite — 理解重写        (~{est_rewrite:,} tokens)" if est_rewrite else "Rewrite — 理解重写"
+    opt_study    = f"Study — 中文复习笔记      (~{est_study:,} tokens)" if est_study else "Study — 中文复习笔记"
+    opt_tutorial = f"Tutorial — 中文详细教程   (~{est_tutorial:,} tokens)" if est_tutorial else "Tutorial — 中文详细教程"
+    idx = select_menu("Enhancement mode:", [opt_cleanup, opt_rewrite, opt_study, opt_tutorial], show_back=True)
     if idx is None:
         return None
-    return ["cleanup", "rewrite", "study"][idx]
+    return ["cleanup", "rewrite", "study", "tutorial"][idx]
 
 
-def select_model() -> tuple[str, str] | None:
+def select_model(est_prompt: int = 0, est_completion: int = 0) -> tuple[str, str] | None:
     """Select API model. Returns (model_id, model_name) or None (back).
 
+    If est_prompt/est_completion provided, shows estimated cost per model.
     Note: caller should check OPENROUTER_API_KEY before calling this.
     """
-    options = [f"{i+1}) {m.split('/')[-1]}" for i, m in enumerate(MODELS)]
+    options = []
+    for m in MODELS:
+        name = m["id"].split("/")[-1]
+        if est_prompt or est_completion:
+            cost = estimate_cost(est_prompt, est_completion, m["id"])
+            options.append(f"{name:28s}  ~{format_cost(cost):8s}  (${m['input']:.2f}/${m['output']:.2f} per 1M)")
+        else:
+            options.append(f"{name:28s}  ${m['input']:.2f} / ${m['output']:.2f} per 1M")
     idx = select_menu("Select model:", options, show_back=True)
     if idx is None:
         return None
 
-    model_id = MODELS[idx]
+    model_id = MODELS[idx]["id"]
     return model_id, model_id.split("/")[-1]
 
 
@@ -339,6 +393,7 @@ def _enhance_one(md: Path, dst: Path, mode: str, model_id: str) -> dict:
         "dst_size": dst.stat().st_size,
         "usage": usage,
         "time": elapsed,
+        "model_id": model_id,
     }
 
 
@@ -429,7 +484,7 @@ def enhance_all(source: dict, output_dir: Path, mode: str, model_id: str) -> lis
             results.append({
                 "name": dst.name, "status": "ok",
                 "src_size": md.stat().st_size, "dst_size": dst.stat().st_size,
-                "usage": usage, "time": api_time,
+                "usage": usage, "time": api_time, "model_id": model_id,
             })
         except Exception as e:
             console.print(f"  [red]✗ Error: {e}[/red]")
@@ -521,6 +576,11 @@ def _print_enhance_summary(results: list[dict], total_elapsed: float, mode: str)
             f"[yellow]{total_usage['completion_tokens']:,}[/yellow] completion = "
             f"[yellow bold]{total_usage['total_tokens']:,}[/yellow bold] total"
         )
+        # Add cost if model_id is available in results
+        first_ok = ok[0]
+        if "model_id" in first_ok:
+            total_cost = estimate_cost(total_usage["prompt_tokens"], total_usage["completion_tokens"], first_ok["model_id"])
+            panel_lines.append(f"💰 Cost: [green bold]{format_cost(total_cost)}[/green bold]")
 
     console.print()
     console.print(Panel("\n".join(panel_lines), title=f"[bold]Enhancement Summary ({mode})[/bold]", border_style="green"))
@@ -557,6 +617,370 @@ def _print_enhance_summary(results: list[dict], total_elapsed: float, mode: str)
         )
 
     console.print(table)
+
+
+# ── PDF → MD via Vision API ───────────────────────────────────────
+
+def _render_pdf_pages(pdf_path: Path, dpi: int = 150) -> list[str]:
+    """Render all PDF pages to base64 JPEG strings.
+
+    Returns list of base64-encoded JPEG images (one per page).
+    Used by the 'image' input method.
+    """
+    import base64
+    import io
+    import pypdfium2
+
+    doc = pypdfium2.PdfDocument(str(pdf_path))
+    images = []
+    scale = dpi / 72  # pypdfium2 default is 72 DPI
+
+    for i in range(len(doc)):
+        page = doc[i]
+        bitmap = page.render(scale=scale)
+        pil_image = bitmap.to_pil()
+
+        buf = io.BytesIO()
+        pil_image.save(buf, format="JPEG", quality=85)
+        b64 = base64.b64encode(buf.getvalue()).decode()
+        images.append(b64)
+
+    doc.close()
+    return images
+
+
+def select_pdf_model(est_prompt: int = 0, est_completion: int = 0) -> tuple[str, str] | None:
+    """Select a model for PDF conversion. Returns (model_id, model_name) or None.
+
+    If est_prompt/est_completion provided, shows estimated cost per model.
+    """
+    options = []
+    for m in PDF_MODELS:
+        name = m["id"].split("/")[-1]
+        if est_prompt or est_completion:
+            cost = estimate_cost(est_prompt, est_completion, m["id"])
+            options.append(f"{name:28s}  ~{format_cost(cost):8s}  (${m['input']:.2f}/${m['output']:.2f} per 1M)")
+        else:
+            options.append(f"{name:28s}  ${m['input']:.2f} / ${m['output']:.2f} per 1M")
+    idx = select_menu("Select model:", options, show_back=True)
+    if idx is None:
+        return None
+    model_id = PDF_MODELS[idx]["id"]
+    return model_id, model_id.split("/")[-1]
+
+
+def _extract_pdf_page_range(pdf_path: Path, start: int, end: int) -> bytes:
+    """Extract a page range from a PDF and return as bytes.
+
+    Args:
+        pdf_path: source PDF
+        start: start page index (0-based, inclusive)
+        end: end page index (0-based, exclusive)
+
+    Returns: PDF bytes of the sub-document
+    """
+    import pypdfium2
+
+    doc = pypdfium2.PdfDocument(str(pdf_path))
+    new_doc = pypdfium2.PdfDocument.new()
+    new_doc.import_pages(doc, list(range(start, end)))
+
+    import io
+    buf = io.BytesIO()
+    new_doc.save(buf)
+    pdf_bytes = buf.getvalue()
+
+    new_doc.close()
+    doc.close()
+    return pdf_bytes
+
+
+def _call_pdf_api(pdf_bytes: bytes, filename: str, model_id: str,
+                  prompt: str, quiet: bool = False) -> tuple[str, dict]:
+    """Send a PDF file directly to the API.
+
+    Uses the OpenAI-compatible 'file' content type.
+    Much more efficient than rendering to images — smaller payload, fewer tokens.
+    Returns (markdown_text, usage_dict).
+    """
+    import base64
+    from openai import OpenAI
+
+    client = OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=os.environ.get("OPENROUTER_API_KEY", ""),
+    )
+
+    pdf_b64 = base64.b64encode(pdf_bytes).decode()
+
+    content = [
+        {"type": "text", "text": prompt},
+        {
+            "type": "file",
+            "file": {
+                "filename": filename,
+                "file_data": f"data:application/pdf;base64,{pdf_b64}",
+            },
+        },
+    ]
+
+    delays = [1, 2, 4, 8, 16, 32]
+    last_err = None
+
+    for attempt in range(len(delays) + 1):
+        try:
+            response = client.chat.completions.create(
+                model=model_id,
+                messages=[
+                    {"role": "user", "content": content},
+                ],
+                temperature=0.1,
+                max_tokens=16000,
+            )
+
+            usage = empty_usage()
+            if response.usage:
+                usage["prompt_tokens"] = getattr(response.usage, "prompt_tokens", 0) or 0
+                usage["completion_tokens"] = getattr(response.usage, "completion_tokens", 0) or 0
+                usage["total_tokens"] = getattr(response.usage, "total_tokens", 0) or 0
+
+            return response.choices[0].message.content, usage
+
+        except Exception as e:
+            last_err = e
+            if attempt < len(delays):
+                wait = delays[attempt]
+                if not quiet:
+                    console.print(f"  [yellow]⚠ API error, retry in {wait}s: {e}[/yellow]")
+                time.sleep(wait)
+            else:
+                raise last_err
+
+
+def _call_image_api(images_b64: list[str], model_id: str,
+                    prompt: str, quiet: bool = False) -> tuple[str, dict]:
+    """Send page images to a vision model and get markdown back.
+
+    Sends all images in a single request as multiple image_url content parts.
+    Returns (markdown_text, usage_dict).
+    """
+    from openai import OpenAI
+
+    client = OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=os.environ.get("OPENROUTER_API_KEY", ""),
+    )
+
+    content = [{"type": "text", "text": prompt}]
+    for b64 in images_b64:
+        content.append({
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:image/jpeg;base64,{b64}",
+            },
+        })
+
+    delays = [1, 2, 4, 8, 16, 32]
+    last_err = None
+
+    for attempt in range(len(delays) + 1):
+        try:
+            response = client.chat.completions.create(
+                model=model_id,
+                messages=[
+                    {"role": "user", "content": content},
+                ],
+                temperature=0.1,
+                max_tokens=16000,
+            )
+
+            usage = empty_usage()
+            if response.usage:
+                usage["prompt_tokens"] = getattr(response.usage, "prompt_tokens", 0) or 0
+                usage["completion_tokens"] = getattr(response.usage, "completion_tokens", 0) or 0
+                usage["total_tokens"] = getattr(response.usage, "total_tokens", 0) or 0
+
+            return response.choices[0].message.content, usage
+
+        except Exception as e:
+            last_err = e
+            if attempt < len(delays):
+                wait = delays[attempt]
+                if not quiet:
+                    console.print(f"  [yellow]⚠ API error, retry in {wait}s: {e}[/yellow]")
+                time.sleep(wait)
+            else:
+                raise last_err
+
+
+def convert_pdf_via_api(
+    pdf_path: Path,
+    output_dir: Path,
+    model_id: str,
+    input_method: str = "pdf",
+    pages_per_batch: int = 30,
+    index: int | None = None,
+    total: int | None = None,
+) -> dict:
+    """Convert a single PDF to Markdown via API.
+
+    Supports two input methods:
+      - "pdf":   send PDF file directly (smaller payload, fewer tokens, default)
+      - "image": render pages to JPEG images then send (fallback if PDF fails)
+
+    Large PDFs are split into batches of pages_per_batch.
+
+    Args:
+        pdf_path: Path to PDF
+        output_dir: Directory to save output (creates stem/ subdirectory)
+        model_id: OpenRouter model ID
+        input_method: "pdf" (default) or "image"
+        pages_per_batch: Max pages per API call (default 30 for PDF, 10 for image)
+        index/total: For display (e.g. [2/5])
+
+    Returns: stats dict (same shape as convert_single for compatibility)
+    """
+    import pypdfium2
+
+    pdf_size = pdf_path.stat().st_size
+    prefix = f"[{index}/{total}]" if index and total else ""
+    stem = pdf_path.stem
+
+    # Skip if already converted
+    part_out_dir = output_dir / stem
+    existing_md = part_out_dir / f"{stem}.md"
+    if existing_md.exists() and existing_md.stat().st_size > 0:
+        console.print(f"\n[dim]{prefix} {pdf_path.name} — already converted, skipping[/dim]")
+        return {"name": pdf_path.name, "status": "skipped"}
+
+    # Get page count
+    doc = pypdfium2.PdfDocument(str(pdf_path))
+    n_pages = len(doc)
+    doc.close()
+
+    method_label = "PDF direct" if input_method == "pdf" else "images"
+    console.print(f"\n[cyan bold]{prefix} {pdf_path.name}[/cyan bold] "
+                  f"[dim]({_format_size(pdf_size)}, {n_pages} pages, {method_label})[/dim]")
+
+    start = time.time()
+    prompt = PROMPTS.get("convert", "Convert these lecture slides to structured Markdown notes.")
+    total_usage = empty_usage()
+    md_parts = []
+
+    # Adjust batch size for image mode (images are much larger per page)
+    effective_batch = pages_per_batch if input_method == "pdf" else min(pages_per_batch, 10)
+    n_batches = (n_pages + effective_batch - 1) // effective_batch
+
+    if input_method == "pdf":
+        # ── PDF direct mode ──────────────────────────────────────
+        for batch_idx in range(n_batches):
+            batch_start = batch_idx * effective_batch
+            batch_end = min(batch_start + effective_batch, n_pages)
+            batch_label = f"p.{batch_start+1}-{batch_end}"
+
+            console.print(f"  ├ [blue]API:[/blue]     batch {batch_idx+1}/{n_batches} "
+                          f"({batch_label}, {batch_end - batch_start} pages)...")
+
+            # Extract sub-PDF for this batch (or use whole file if single batch)
+            if n_batches == 1:
+                pdf_bytes = pdf_path.read_bytes()
+                fname = pdf_path.name
+            else:
+                pdf_bytes = _extract_pdf_page_range(pdf_path, batch_start, batch_end)
+                fname = f"{stem}_p{batch_start+1}-{batch_end}.pdf"
+
+            batch_prompt = prompt
+            if n_batches > 1:
+                batch_prompt += (
+                    f"\n\nThis is batch {batch_idx+1} of {n_batches} "
+                    f"(pages {batch_start+1}-{batch_end} of {n_pages}). "
+                    f"Continue from where the previous batch ended. "
+                    f"Do not repeat content from previous batches."
+                )
+
+            result_text, usage = _call_pdf_api(pdf_bytes, fname, model_id, batch_prompt)
+            md_parts.append(result_text)
+
+            for k in total_usage:
+                total_usage[k] += usage[k]
+            console.print(f"  │         [yellow]{usage['total_tokens']:,}[/yellow] tokens")
+
+    else:
+        # ── Image mode (fallback) ───────────────────────────────
+        console.print(f"  ├ [blue]render:[/blue]  converting pages to images...")
+        images = _render_pdf_pages(pdf_path)
+        render_time = time.time() - start
+        total_img_kb = sum(len(b) for b in images) * 3 // 4 // 1024
+        console.print(f"  ├ [blue]render:[/blue]  [yellow]{len(images)}[/yellow] pages "
+                      f"(~{total_img_kb} KB)  [dim]{render_time:.1f}s[/dim]")
+
+        for batch_idx in range(n_batches):
+            batch_start = batch_idx * effective_batch
+            batch_end = min(batch_start + effective_batch, len(images))
+            batch_images = images[batch_start:batch_end]
+            batch_label = f"p.{batch_start+1}-{batch_end}"
+
+            console.print(f"  ├ [blue]API:[/blue]     batch {batch_idx+1}/{n_batches} "
+                          f"({batch_label}, {len(batch_images)} pages)...")
+
+            batch_prompt = prompt
+            if n_batches > 1:
+                batch_prompt += (
+                    f"\n\nThis is batch {batch_idx+1} of {n_batches} "
+                    f"(pages {batch_start+1}-{batch_end} of {n_pages}). "
+                    f"Continue from where the previous batch ended. "
+                    f"Do not repeat content from previous batches."
+                )
+
+            result_text, usage = _call_image_api(batch_images, model_id, batch_prompt)
+            md_parts.append(result_text)
+
+            for k in total_usage:
+                total_usage[k] += usage[k]
+            console.print(f"  │         [yellow]{usage['total_tokens']:,}[/yellow] tokens")
+
+    # ── Combine and save ─────────────────────────────────────────
+    combined_md = "\n\n".join(md_parts)
+
+    # Strip markdown code fences if model wrapped output
+    combined_md = re.sub(r'^```(?:markdown|md)?\\n', '', combined_md)
+    combined_md = re.sub(r'\\n```$', '', combined_md)
+
+    # Run postprocess
+    from convert import postprocess
+    combined_md, pp_stats = postprocess(combined_md)
+
+    part_out_dir.mkdir(parents=True, exist_ok=True)
+    md_path = part_out_dir / f"{stem}.md"
+    md_path.write_text(combined_md, encoding="utf-8")
+
+    # Final stats
+    out_size = md_path.stat().st_size
+    out_lines = len(combined_md.splitlines())
+    elapsed = time.time() - start
+
+    total_cost = estimate_cost(total_usage["prompt_tokens"], total_usage["completion_tokens"], model_id)
+    console.print(f"  ├ [blue]tokens:[/blue]  [yellow]{total_usage['prompt_tokens']:,}[/yellow] prompt + "
+                  f"[yellow]{total_usage['completion_tokens']:,}[/yellow] completion = "
+                  f"[yellow bold]{total_usage['total_tokens']:,}[/yellow bold]  "
+                  f"💰 [green]{format_cost(total_cost)}[/green]")
+    console.print(f"  └ [green]output:[/green]  [yellow]{out_lines}[/yellow] lines, "
+                  f"[yellow]{_format_size(out_size)}[/yellow]  "
+                  f"→ [dim]{md_path}[/dim]  [dim]{elapsed:.1f}s[/dim]")
+
+    return {
+        "name": pdf_path.name,
+        "status": "ok",
+        "md_path": str(md_path),
+        "pages": n_pages,
+        "images": 0,
+        "code_blocks": pp_stats["code_blocks"],
+        "headings": pp_stats["headings"],
+        "out_size": out_size,
+        "out_lines": out_lines,
+        "time": elapsed,
+        "usage": total_usage,
+    }
 
 
 # ── Interactive Enhance Flow ─────────────────────────────────────
@@ -650,11 +1074,13 @@ def enhance_interactive():
             total_est_cleanup = sum(s["est_tokens_cleanup"] for s in selected_list)
             total_est_rewrite = sum(s["est_tokens_rewrite"] for s in selected_list)
             total_est_study = sum(s["est_tokens_study"] for s in selected_list)
+            total_est_tutorial = sum(s["est_tokens_tutorial"] for s in selected_list)
 
             mode = select_mode(
                 est_cleanup=total_est_cleanup,
                 est_rewrite=total_est_rewrite,
                 est_study=total_est_study,
+                est_tutorial=total_est_tutorial,
             )
             if mode is None:
                 step = 1; continue
@@ -665,16 +1091,33 @@ def enhance_interactive():
             console.print(f"\n🔧 Mode [bold]{mode}[/bold] — {MODES[mode]}")
             console.print(f"📊 Estimated tokens: [yellow bold]~{total_est:,}[/yellow bold]")
 
+            # Show cost range across all enhance models
+            est_detail = estimate_tokens("x" * total_est * 4, mode)  # rough split
+            costs = [estimate_cost(est_detail["prompt_tokens"], est_detail["completion_tokens"], m["id"]) for m in MODELS]
+            if costs:
+                lo, hi = min(costs), max(costs)
+                console.print(f"💰 Estimated cost: [green]{format_cost(lo)}[/green] ~ [yellow]{format_cost(hi)}[/yellow]")
+
             step = 3
             continue
 
         # ── Step 3: Select model ─────────────────────────────────
         elif step == 3:
-            result = select_model()
+            # Calculate token estimates for cost display
+            est_key_2 = f"est_tokens_{mode}"
+            total_est_2 = sum(s[est_key_2] for s in selected_list)
+            est_detail_2 = estimate_tokens("x" * total_est_2 * 4, mode)
+
+            result = select_model(
+                est_prompt=est_detail_2["prompt_tokens"],
+                est_completion=est_detail_2["completion_tokens"],
+            )
             if result is None:
                 step = 2; continue
             model_id, model_name = result
-            console.print(f"🤖 Model: [cyan]{model_name}[/cyan]")
+
+            est_cost = estimate_cost(est_detail_2["prompt_tokens"], est_detail_2["completion_tokens"], model_id)
+            console.print(f"  🤖 [cyan]{model_name}[/cyan]  💰 ~[yellow]{format_cost(est_cost)}[/yellow]")
 
             step = 4
             continue
