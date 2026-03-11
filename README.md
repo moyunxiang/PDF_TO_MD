@@ -4,6 +4,8 @@
 
 ## 快速开始
 
+### macOS / Linux
+
 ```bash
 # 1. 安装环境
 make setup
@@ -14,6 +16,21 @@ export OPENROUTER_API_KEY=sk-or-v1-your-key-here
 # 3. 启动
 make run
 ```
+
+### Windows
+
+```cmd
+# 1. 安装环境
+setup.bat
+
+# 2. (可选) 配置 API key
+set OPENROUTER_API_KEY=sk-or-v1-your-key-here
+
+# 3. 启动
+run.bat
+```
+
+> **Windows 说明**：箭头键菜单自动降级为数字输入菜单，功能完全一致。
 
 运行后会弹出交互主菜单：
 
@@ -79,7 +96,8 @@ make enhance
 |---|---|
 | **cleanup** | 格式整理（保持内容不变，修复排版） |
 | **rewrite** | 理解重写（重组为英文学习笔记） |
-| **study** | 中文学习笔记（详细中文讲解 + 英文术语/代码，可直接用于学习） |
+| **study** | 中文复习笔记（中文讲解 + 英文术语，复习总结） |
+| **tutorial** | 中文详细教程（逐个知识点深入讲解，逐行代码分析，每道题完整解题） |
 
 | 模型（OpenRouter） | 特点 |
 |---|---|
@@ -92,26 +110,28 @@ make enhance
 
 ## 命令一览
 
-| 命令 | 说明 |
-|---|---|
-| `make run` | **主入口** — 交互式主菜单 |
-| `make convert` | 转换 PDF（支持单选/多选/全部） |
-| `make split F=xxx.pdf` | 拆分大 PDF → `pdf/{name}/` |
-| `make split-pages F=xxx.pdf P=50` | 按页数拆分 |
-| `make enhance` | API 增强已有 MD |
-| `make clean` | 清理 markdown/ 和 enhanced/ |
-| `make setup` | 安装环境 |
+| 命令 (macOS/Linux) | Windows 等价 | 说明 |
+|---|---|---|
+| `make run` | `run.bat` | **主入口** — 交互式主菜单 |
+| `make convert` | `run.bat convert` | 转换 PDF（本地模型 / API） |
+| `make split F=xxx.pdf` | `run.bat split xxx.pdf` | 拆分大 PDF → `pdf/{name}/` |
+| `make enhance` | `run.bat enhance` | API 增强已有 MD |
+| `make clean` | 手动删除 `markdown/` `enhanced/` | 清理输出 |
+| `make setup` | `setup.bat` | 安装环境 |
 
 ## 目录结构
 
 ```
-main.py      → 统一入口（主菜单 + CLI）
-convert.py   → 核心转换（marker + 后处理 + 动态 batch size）
-api.py       → API 增强（独立步骤，OpenRouter）
-split.py     → 大 PDF 拆分（纯拆分，不转换）
-models.json  → API 模型配置（可增删）
-prompts.json → 提示词配置（cleanup/rewrite/study，可微调）
-pdf/         → 输入 PDF（拆分后的子目录也在这里）
-markdown/    → 纯净 Markdown（转换产出 + 可手动放入）
-enhanced/    → API 增强版 Markdown（按模式命名：*_cleanup / *_rewrite / *_study）
+main.py          → 统一入口（主菜单 + CLI）
+convert.py       → 核心转换（marker + 后处理 + 动态 batch size）
+api.py           → API 增强（独立步骤，OpenRouter + 费用估算）
+split.py         → 大 PDF 拆分（纯拆分，不转换）
+models.json      → 增强模型配置（id + 价格）
+pdf_models.json  → PDF 转换模型配置（支持 vision/PDF 输入）
+prompts.json     → 提示词配置（cleanup/rewrite/study/tutorial/convert）
+setup.bat        → Windows 安装脚本
+run.bat          → Windows 运行脚本
+pdf/             → 输入 PDF
+markdown/        → 纯净 Markdown（转换产出 + 可手动放入）
+enhanced/        → API 增强版 Markdown
 ```

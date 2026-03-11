@@ -35,14 +35,34 @@ _TIER_MULT = {"low": 0.5, "medium": 1.0, "high": 1.5}
 
 
 def _get_total_memory_gb() -> float:
-    """Get total system memory in GB (no psutil needed)."""
+    """Get total system memory in GB (cross-platform, no psutil needed)."""
     import platform
     import subprocess
+    system = platform.system()
     try:
-        if platform.system() == "Darwin":
+        if system == "Darwin":
             out = subprocess.check_output(["sysctl", "-n", "hw.memsize"], text=True)
             return int(out.strip()) / (1024 ** 3)
+        elif system == "Windows":
+            import ctypes
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+            stat = MEMORYSTATUSEX()
+            stat.dwLength = ctypes.sizeof(stat)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
+            return stat.ullTotalPhys / (1024 ** 3)
         else:
+            # Linux
             with open("/proc/meminfo") as f:
                 for line in f:
                     if line.startswith("MemTotal"):
@@ -273,55 +293,111 @@ def select_menu(title: str, options: list[str], show_back: bool = False) -> int 
 
     If show_back=True, appends '← Back' option at the bottom.
     Selecting it (or pressing Escape) returns None.
+
+    Falls back to numbered input on Windows (simple-term-menu requires Unix).
     """
-    from simple_term_menu import TerminalMenu
-    display = list(options)
+    try:
+        from simple_term_menu import TerminalMenu
+        display = list(options)
+        if show_back:
+            display.append("← Back")
+        menu = TerminalMenu(
+            display,
+            title=title,
+            menu_cursor="→ ",
+            menu_cursor_style=("fg_cyan", "bold"),
+            menu_highlight_style=("fg_cyan", "bold"),
+            clear_screen=False,
+        )
+        idx = menu.show()
+        if idx is None:
+            return None
+        if show_back and idx == len(options):
+            return None
+        return idx
+    except ImportError:
+        return _fallback_menu(title, options, show_back)
+
+
+def _fallback_menu(title: str, options: list[str], show_back: bool = False) -> int | None:
+    """Numbered input fallback for Windows / environments without simple-term-menu."""
+    console.print(f"[bold]{title}[/bold]")
+    for i, opt in enumerate(options, 1):
+        console.print(f"  [cyan]{i})[/cyan] {opt}")
     if show_back:
-        display.append("← Back")
-    menu = TerminalMenu(
-        display,
-        title=title,
-        menu_cursor="→ ",
-        menu_cursor_style=("fg_cyan", "bold"),
-        menu_highlight_style=("fg_cyan", "bold"),
-        clear_screen=False,
-    )
-    idx = menu.show()
-    if idx is None:
-        return None
-    if show_back and idx == len(options):
-        return None  # '← Back' selected
-    return idx
+        console.print(f"  [dim]0) ← Back[/dim]")
+
+    valid = set(range(1, len(options) + 1))
+    if show_back:
+        valid.add(0)
+
+    while True:
+        try:
+            raw = input(f"Enter choice [1-{len(options)}]: ").strip()
+            if not raw:
+                return None
+            n = int(raw)
+            if n == 0 and show_back:
+                return None
+            if n in valid:
+                return n - 1
+            console.print(f"  [red]Invalid, enter 1-{len(options)}[/red]")
+        except ValueError:
+            console.print(f"  [red]Enter a number[/red]")
+        except (EOFError, KeyboardInterrupt):
+            return None
 
 
 def select_menu_multi(title: str, options: list[str]) -> list[int] | None:
     """Arrow-key multi-select menu. Space/Tab to toggle, Enter to confirm.
 
-    Uses clear_screen to show all options on full terminal.
     Returns list of selected indices, or None if cancelled.
+    Falls back to comma-separated input on Windows.
     """
-    from simple_term_menu import TerminalMenu
-    menu = TerminalMenu(
-        options,
-        title=title,
-        menu_cursor="→ ",
-        menu_cursor_style=("fg_cyan", "bold"),
-        menu_highlight_style=("fg_cyan", "bold"),
-        multi_select=True,
-        multi_select_cursor="[✓] ",
-        multi_select_cursor_style=("fg_cyan", "bold"),
-        multi_select_select_on_accept=True,
-        show_multi_select_hint=True,
-        show_multi_select_hint_text="(Space: toggle, Enter: confirm)",
-        clear_screen=False,
-    )
-    result = menu.show()
-    if result is None:
+    try:
+        from simple_term_menu import TerminalMenu
+        menu = TerminalMenu(
+            options,
+            title=title,
+            menu_cursor="→ ",
+            menu_cursor_style=("fg_cyan", "bold"),
+            menu_highlight_style=("fg_cyan", "bold"),
+            multi_select=True,
+            multi_select_cursor="[✓] ",
+            multi_select_cursor_style=("fg_cyan", "bold"),
+            multi_select_select_on_accept=True,
+            show_multi_select_hint=True,
+            show_multi_select_hint_text="(Space: toggle, Enter: confirm)",
+            clear_screen=False,
+        )
+        result = menu.show()
+        if result is None:
+            return None
+        if isinstance(result, int):
+            return [result]
+        return list(result)
+    except ImportError:
+        return _fallback_menu_multi(title, options)
+
+
+def _fallback_menu_multi(title: str, options: list[str]) -> list[int] | None:
+    """Comma-separated input fallback for Windows."""
+    console.print(f"[bold]{title}[/bold]")
+    for i, opt in enumerate(options, 1):
+        console.print(f"  [cyan]{i})[/cyan] {opt}")
+
+    try:
+        raw = input(f"Enter choices (comma-separated, e.g. 1,3,5): ").strip()
+        if not raw:
+            return None
+        indices = []
+        for part in raw.split(","):
+            n = int(part.strip())
+            if 1 <= n <= len(options):
+                indices.append(n - 1)
+        return indices if indices else None
+    except (ValueError, EOFError, KeyboardInterrupt):
         return None
-    # TerminalMenu returns tuple of indices for multi-select
-    if isinstance(result, int):
-        return [result]
-    return list(result)
 
 
 # ── Post-processing ──────────────────────────────────────────────
