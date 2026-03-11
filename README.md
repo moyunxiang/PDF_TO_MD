@@ -116,6 +116,7 @@ make enhance
 | `make convert` | `run.bat convert` | 转换 PDF（本地模型 / API） |
 | `make split F=xxx.pdf` | `run.bat split xxx.pdf` | 拆分大 PDF → `pdf/{name}/` |
 | `make enhance` | `run.bat enhance` | API 增强已有 MD |
+| `make pricing` | `run.bat pricing` | 更新模型价格缓存（从 OpenRouter 免费拉取） |
 | `make clean` | 手动删除 `markdown/` `enhanced/` | 清理输出 |
 | `make setup` | `setup.bat` | 安装环境 |
 
@@ -126,8 +127,9 @@ main.py          → 统一入口（主菜单 + CLI）
 convert.py       → 核心转换（marker + 后处理 + 动态 batch size）
 api.py           → API 增强（独立步骤，OpenRouter + 费用估算）
 split.py         → 大 PDF 拆分（纯拆分，不转换）
-models.json      → 增强模型配置（id + 价格）
-pdf_models.json  → PDF 转换模型配置（支持 vision/PDF 输入）
+models.json      → 增强模型 ID 列表
+pdf_models.json  → PDF 转换模型 ID 列表（支持 PDF/图片输入）
+pricing.json     → 模型价格缓存（首次自动生成，make pricing 更新)
 prompts/         → 提示词目录（每个模式一个 .txt，可直接编辑）
 setup.bat        → Windows 安装脚本
 run.bat          → Windows 运行脚本

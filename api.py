@@ -31,8 +31,8 @@ ENHANCED_DIR = Path("enhanced")
 MODELS_FILE = Path(__file__).parent / "models.json"
 
 
-def _load_models() -> list[dict]:
-    """Load models from models.json. Each: {id, input, output}."""
+def _load_models() -> list[str]:
+    """Load model IDs from models.json."""
     import json
     return json.loads(MODELS_FILE.read_text(encoding="utf-8"))
 
@@ -51,19 +51,116 @@ def _load_pdf_models() -> list[str]:
 PDF_MODELS = _load_pdf_models()
 
 
-# ── Pricing ──────────────────────────────────────────────────────
+# ── Pricing (cached locally, updated via `make pricing`) ─────────
 
-# Combined pricing lookup: model_id → (input_price, output_price) per 1M tokens
+PRICING_FILE = Path(__file__).parent / "pricing.json"
 MODEL_PRICING: dict[str, tuple[float, float]] = {}
-for _m in MODELS + PDF_MODELS:
-    MODEL_PRICING[_m["id"]] = (_m["input"], _m["output"])
+
+
+def _fetch_pricing_from_api() -> dict[str, dict]:
+    """Fetch live model pricing from OpenRouter (free, no API key needed).
+
+    Returns raw dict: model_id → {"input": x, "output": y, "name": "..."}.
+    """
+    import json
+    import urllib.request
+
+    req = urllib.request.Request(
+        "https://openrouter.ai/api/v1/models",
+        headers={"User-Agent": "pdf-to-md/1.0"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        data = json.loads(resp.read().decode())
+
+    result = {}
+    for m in data.get("data", []):
+        mid = m["id"]
+        p = m.get("pricing", {})
+        inp = float(p.get("prompt", 0)) * 1_000_000   # per-token → per-1M
+        out = float(p.get("completion", 0)) * 1_000_000
+        if inp > 0 or out > 0:
+            result[mid] = {"input": round(inp, 4), "output": round(out, 4), "name": m.get("name", mid)}
+    return result
+
+
+def update_pricing(quiet: bool = False) -> int:
+    """Fetch latest pricing from OpenRouter and save to pricing.json.
+
+    Returns number of models saved. Raises on network failure.
+    """
+    import json
+
+    raw = _fetch_pricing_from_api()
+    # Sort by model ID for readability
+    sorted_data = dict(sorted(raw.items()))
+
+    # Save with metadata
+    out = {
+        "_updated": __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "_count": len(sorted_data),
+        "models": sorted_data,
+    }
+    PRICING_FILE.write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    if not quiet:
+        console.print(f"[green]✓ pricing.json updated: {len(sorted_data)} models[/green]")
+    return len(sorted_data)
+
+
+def _load_pricing() -> dict[str, tuple[float, float]]:
+    """Load pricing from local pricing.json cache.
+
+    Returns dict: model_id → (input_per_1M, output_per_1M).
+    Returns empty dict if file missing (run `make pricing` first).
+    """
+    import json
+
+    if not PRICING_FILE.exists():
+        return {}
+    try:
+        data = json.loads(PRICING_FILE.read_text(encoding="utf-8"))
+        pricing = {}
+        for mid, info in data.get("models", {}).items():
+            pricing[mid] = (info["input"], info["output"])
+        return pricing
+    except Exception:
+        return {}
+
+
+def _init_pricing():
+    """Load cached pricing at startup. If no cache, fetch once."""
+    global MODEL_PRICING
+    MODEL_PRICING = _load_pricing()
+    if MODEL_PRICING:
+        # Check age — show hint if older than 7 days
+        import json, datetime
+        try:
+            data = json.loads(PRICING_FILE.read_text(encoding="utf-8"))
+            updated = datetime.datetime.strptime(data["_updated"], "%Y-%m-%d %H:%M")
+            age_days = (datetime.datetime.now() - updated).days
+            if age_days > 7:
+                console.print(f"[dim]💲 Pricing loaded ({len(MODEL_PRICING)} models, {age_days}d old — run `make pricing` to refresh)[/dim]")
+        except Exception:
+            pass
+    else:
+        # No cache — fetch for first time
+        try:
+            console.print("[dim]💲 First run: fetching pricing from OpenRouter...[/dim]")
+            update_pricing(quiet=True)
+            MODEL_PRICING = _load_pricing()
+            console.print(f"[dim]💲 pricing.json created ({len(MODEL_PRICING)} models)[/dim]")
+        except Exception:
+            console.print("[dim]💲 Could not fetch pricing (offline?) — costs will show as $0[/dim]")
+
+
+_init_pricing()
 
 
 def estimate_cost(prompt_tokens: int, completion_tokens: int, model_id: str) -> float:
     """Estimate cost in USD given token counts and model ID.
 
-    Prices are per 1M tokens from models.json / pdf_models.json.
-    Returns 0.0 if model not found in pricing table.
+    Uses live pricing from OpenRouter API.
+    Returns 0.0 if model not found or pricing unavailable.
     """
     inp_price, out_price = MODEL_PRICING.get(model_id, (0, 0))
     return (prompt_tokens * inp_price + completion_tokens * out_price) / 1_000_000
@@ -71,7 +168,7 @@ def estimate_cost(prompt_tokens: int, completion_tokens: int, model_id: str) -> 
 
 def format_cost(cost: float) -> str:
     """Format a USD cost for display."""
-    if cost < 0.01:
+    if cost < 0.001:
         return f"${cost:.4f}"
     elif cost < 1.0:
         return f"${cost:.3f}"
@@ -258,17 +355,21 @@ def select_model(est_prompt: int = 0, est_completion: int = 0) -> tuple[str, str
     """
     options = []
     for m in MODELS:
-        name = m["id"].split("/")[-1]
-        if est_prompt or est_completion:
-            cost = estimate_cost(est_prompt, est_completion, m["id"])
-            options.append(f"{name:28s}  ~{format_cost(cost):8s}  (${m['input']:.2f}/${m['output']:.2f} per 1M)")
+        name = m.split("/")[-1]
+        inp, out = MODEL_PRICING.get(m, (0, 0))
+        price_str = f"${inp:.2f}/${out:.2f} per 1M" if inp else ""
+        if (est_prompt or est_completion) and inp:
+            cost = estimate_cost(est_prompt, est_completion, m)
+            options.append(f"{name:28s}  ~{format_cost(cost):8s}  ({price_str})")
+        elif price_str:
+            options.append(f"{name:28s}  {price_str}")
         else:
-            options.append(f"{name:28s}  ${m['input']:.2f} / ${m['output']:.2f} per 1M")
+            options.append(name)
     idx = select_menu("Select model:", options, show_back=True)
     if idx is None:
         return None
 
-    model_id = MODELS[idx]["id"]
+    model_id = MODELS[idx]
     return model_id, model_id.split("/")[-1]
 
 
@@ -368,9 +469,11 @@ def enhance_file(md_path: Path, mode: str, model_id: str) -> dict:
 
     text, usage = call_api_chunked(text, mode, model_id)
 
+    file_cost = estimate_cost(usage["prompt_tokens"], usage["completion_tokens"], model_id)
     console.print(f"  ├ [blue]API:[/blue]     [yellow]{usage['prompt_tokens']:,}[/yellow] prompt + "
                   f"[yellow]{usage['completion_tokens']:,}[/yellow] completion = "
-                  f"[yellow bold]{usage['total_tokens']:,}[/yellow bold] tokens")
+                  f"[yellow bold]{usage['total_tokens']:,}[/yellow bold] tokens  "
+                  f"💰 [green]{format_cost(file_cost)}[/green]")
 
     md_path.write_text(text, encoding="utf-8")
     return usage
@@ -479,9 +582,11 @@ def enhance_all(source: dict, output_dir: Path, mode: str, model_id: str) -> lis
             api_time = time.time() - api_start
             dst.write_text(enhanced_text, encoding="utf-8")
 
+            single_cost = estimate_cost(usage["prompt_tokens"], usage["completion_tokens"], model_id)
             console.print(f"  ├ [blue]tokens:[/blue]  [yellow]{usage['prompt_tokens']:,}[/yellow] prompt + "
                           f"[yellow]{usage['completion_tokens']:,}[/yellow] completion = "
-                          f"[yellow bold]{usage['total_tokens']:,}[/yellow bold]")
+                          f"[yellow bold]{usage['total_tokens']:,}[/yellow bold]  "
+                          f"💰 [green]{format_cost(single_cost)}[/green]")
             console.print(f"  └ [green]saved:[/green]  {dst}  [dim]{api_time:.1f}s[/dim]")
             results.append({
                 "name": dst.name, "status": "ok",
@@ -523,9 +628,11 @@ def enhance_all(source: dict, output_dir: Path, mode: str, model_id: str) -> lis
                         result = future.result()
                         progress.stop()
                         done_count += 1
+                        par_cost = estimate_cost(result["usage"]["prompt_tokens"], result["usage"]["completion_tokens"], result.get("model_id", ""))
                         console.print(
                             f"  [green]✓[/green] [{done_count}/{n}] [cyan]{result['name']}[/cyan]  "
                             f"[yellow]{result['usage']['total_tokens']:,}[/yellow] tokens  "
+                            f"💰 [green]{format_cost(par_cost)}[/green]  "
                             f"[dim]{result['time']:.1f}s[/dim]"
                         )
                         results.append(result)
@@ -658,16 +765,20 @@ def select_pdf_model(est_prompt: int = 0, est_completion: int = 0) -> tuple[str,
     """
     options = []
     for m in PDF_MODELS:
-        name = m["id"].split("/")[-1]
-        if est_prompt or est_completion:
-            cost = estimate_cost(est_prompt, est_completion, m["id"])
-            options.append(f"{name:28s}  ~{format_cost(cost):8s}  (${m['input']:.2f}/${m['output']:.2f} per 1M)")
+        name = m.split("/")[-1]
+        inp, out = MODEL_PRICING.get(m, (0, 0))
+        price_str = f"${inp:.2f}/${out:.2f} per 1M" if inp else ""
+        if (est_prompt or est_completion) and inp:
+            cost = estimate_cost(est_prompt, est_completion, m)
+            options.append(f"{name:28s}  ~{format_cost(cost):8s}  ({price_str})")
+        elif price_str:
+            options.append(f"{name:28s}  {price_str}")
         else:
-            options.append(f"{name:28s}  ${m['input']:.2f} / ${m['output']:.2f} per 1M")
+            options.append(name)
     idx = select_menu("Select model:", options, show_back=True)
     if idx is None:
         return None
-    model_id = PDF_MODELS[idx]["id"]
+    model_id = PDF_MODELS[idx]
     return model_id, model_id.split("/")[-1]
 
 
@@ -905,7 +1016,8 @@ def convert_pdf_via_api(
 
             for k in total_usage:
                 total_usage[k] += usage[k]
-            console.print(f"  │         [yellow]{usage['total_tokens']:,}[/yellow] tokens")
+            batch_cost = estimate_cost(usage["prompt_tokens"], usage["completion_tokens"], model_id)
+            console.print(f"  │         [yellow]{usage['total_tokens']:,}[/yellow] tokens  💰 [green]{format_cost(batch_cost)}[/green]")
 
     else:
         # ── Image mode (fallback) ───────────────────────────────
@@ -939,7 +1051,8 @@ def convert_pdf_via_api(
 
             for k in total_usage:
                 total_usage[k] += usage[k]
-            console.print(f"  │         [yellow]{usage['total_tokens']:,}[/yellow] tokens")
+            batch_cost = estimate_cost(usage["prompt_tokens"], usage["completion_tokens"], model_id)
+            console.print(f"  │         [yellow]{usage['total_tokens']:,}[/yellow] tokens  💰 [green]{format_cost(batch_cost)}[/green]")
 
     # ── Combine and save ─────────────────────────────────────────
     combined_md = "\n\n".join(md_parts)
@@ -1095,7 +1208,7 @@ def enhance_interactive():
 
             # Show cost range across all enhance models
             est_detail = estimate_tokens("x" * total_est * 4, mode)  # rough split
-            costs = [estimate_cost(est_detail["prompt_tokens"], est_detail["completion_tokens"], m["id"]) for m in MODELS]
+            costs = [estimate_cost(est_detail["prompt_tokens"], est_detail["completion_tokens"], m) for m in MODELS]
             if costs:
                 lo, hi = min(costs), max(costs)
                 console.print(f"💰 Estimated cost: [green]{format_cost(lo)}[/green] ~ [yellow]{format_cost(hi)}[/yellow]")

@@ -1,6 +1,7 @@
 [
-    {"id": "openai/gpt-4o-mini",              "input": 0.15,  "output": 0.60},
-    {"id": "deepseek/deepseek-chat-v3-0324",  "input": 0.14,  "output": 0.28},
-    {"id": "qwen/qwen-2.5-72b-instruct",     "input": 0.36,  "output": 0.40},
-    {"id": "google/gemini-3-flash-preview",   "input": 0.10,  "output": 0.40}
+    "openai/gpt-4o-mini",
+    "deepseek/deepseek-chat-v3-0324",
+    "qwen/qwen-2.5-72b-instruct",
+    "google/gemini-3-flash-preview",
+    "google/gemini-3.1-pro-preview"
 ]

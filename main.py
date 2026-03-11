@@ -351,7 +351,10 @@ def main():
                     pages = int(sys.argv[pi + 1])
             do_split(pdf_name, pages)
             return
-
+        elif cmd == "pricing":
+            from api import update_pricing
+            update_pricing()
+            return
     # Interactive main menu (loops until Escape)
     while True:
         pdf_items = find_pdfs(PDF_DIR)

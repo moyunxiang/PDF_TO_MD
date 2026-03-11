@@ -1,4 +1,4 @@
-.PHONY: run convert enhance split split-pages clean setup postprocess
+.PHONY: run convert enhance split split-pages pricing clean setup postprocess
 
 VENV := .venv/bin/python
 
@@ -21,6 +21,11 @@ split:
 # Split by page count: make split-pages F=textbook.pdf P=50
 split-pages:
 	$(VENV) main.py split $(F) --pages $(P)
+
+
+# Update model pricing from OpenRouter (free, no API key needed)
+pricing:
+	$(VENV) main.py pricing
 
 # Re-run post-processing only (no re-conversion)
 postprocess:

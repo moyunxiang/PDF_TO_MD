@@ -3,7 +3,7 @@ __pycache__/
 *.pyc
 .DS_Store
 .env
-
+pricing.json
 # Keep folders, ignore their contents
 pdf/*
 !pdf/.gitkeep
