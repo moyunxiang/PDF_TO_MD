@@ -315,7 +315,7 @@ def select_menu(title: str, options: list[str], show_back: bool = False) -> int 
         if show_back and idx == len(options):
             return None
         return idx
-    except ImportError:
+    except (ImportError, NotImplementedError):
         return _fallback_menu(title, options, show_back)
 
 
@@ -376,7 +376,7 @@ def select_menu_multi(title: str, options: list[str]) -> list[int] | None:
         if isinstance(result, int):
             return [result]
         return list(result)
-    except ImportError:
+    except (ImportError, NotImplementedError):
         return _fallback_menu_multi(title, options)
 
 
