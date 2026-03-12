@@ -128,6 +128,17 @@ This means:
 - Do NOT repeat sections.
 - Do NOT sound like a chatbot.
 
+Math formatting rules (strict):
+1. Use `$...$` for inline math only.
+2. Use `$$...$$` for display math only.
+3. Do NOT use `\(...\)` or `\[...\]`.
+4. Leave a blank line before and after every display math block.
+5. Do NOT output HTML math tags such as `<sup>` or `<sub>`.
+6. Preserve subscripts and superscripts correctly in LaTeX form, e.g. `x_n`, `x_{n+1}`, `a^2`.
+7. Do NOT confuse subscripts with exponents.
+8. Do NOT output malformed LaTeX, unmatched braces, or broken math environments.
+9. If a formula is unclear in the source, keep only the reliable part and use `[unclear in source]` if necessary.
+
 ## Quality bar for exercises
 
 For mathematical exercises:

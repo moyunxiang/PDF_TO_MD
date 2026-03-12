@@ -704,30 +704,40 @@ def find_pdfs(pdf_dir: Path) -> list[tuple[Path, Path]]:
     """Find all PDFs to convert, with their output directories.
 
     Returns list of (pdf_path, output_dir) tuples.
+    Supports unlimited nesting depth via rglob.
 
     Logic:
     - pdf/X.pdf → output to markdown/ (becomes markdown/X/X.md)
-    - pdf/Y/Z.pdf → output to markdown/Y/ (becomes markdown/Y/Z/Z.md)
-    - If pdf/X.pdf has a matching pdf/X/ with PDFs, skip pdf/X.pdf (already split)
+    - pdf/A/B/C.pdf → output to markdown/A/B/ (becomes markdown/A/B/C/C.md)
+    - If pdf/X.pdf has a matching pdf/X/ with PDFs inside, skip pdf/X.pdf (already split)
     """
     results = []
 
-    # Top-level PDFs
-    for pdf in sorted(pdf_dir.glob("*.pdf")):
-        sub_dir = pdf_dir / pdf.stem
-        if sub_dir.is_dir() and list(sub_dir.glob("*.pdf")):
-            # This PDF has been split — skip it, convert parts instead
-            continue
-        results.append((pdf, MARKDOWN_DIR))
+    # Find ALL PDFs recursively
+    all_pdfs = sorted(pdf_dir.rglob("*.pdf"))
 
-    # Subdirectory PDFs (from split)
-    for sub in sorted(pdf_dir.iterdir()):
-        if sub.is_dir() and not sub.name.startswith('.'):
-            sub_pdfs = sorted(sub.glob("*.pdf"))
-            if sub_pdfs:
-                out = MARKDOWN_DIR / sub.name
-                for pdf in sub_pdfs:
-                    results.append((pdf, out))
+    # Build a set of top-level dirs that contain PDFs (for split detection)
+    dirs_with_pdfs = set()
+    for pdf in all_pdfs:
+        if pdf.parent != pdf_dir:
+            rel = pdf.relative_to(pdf_dir)
+            dirs_with_pdfs.add(rel.parts[0])
+
+    for pdf in all_pdfs:
+        # Skip hidden files/directories
+        rel = pdf.relative_to(pdf_dir)
+        if any(part.startswith('.') for part in rel.parts):
+            continue
+
+        # Top-level PDFs: skip if a same-name directory with PDFs exists (already split)
+        if pdf.parent == pdf_dir:
+            if pdf.stem in dirs_with_pdfs:
+                continue
+            results.append((pdf, MARKDOWN_DIR))
+        else:
+            # Nested PDF: output preserves relative directory structure
+            out = MARKDOWN_DIR / rel.parent
+            results.append((pdf, out))
 
     return results
 
@@ -736,7 +746,7 @@ def get_output_dir(pdf_path: Path) -> Path:
     """Determine the markdown output directory for a given PDF.
 
     - pdf/X.pdf → markdown/
-    - pdf/Y/Z.pdf → markdown/Y/
+    - pdf/A/B/C.pdf → markdown/A/B/
     """
     try:
         rel = pdf_path.relative_to(PDF_DIR)
