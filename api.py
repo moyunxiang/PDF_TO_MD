@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-API enhancement module — standalone step to enhance Markdown via LLM (OpenRouter).
+API enhancement module — enhance Markdown via LLM (OpenRouter or Poe).
 
 Can be used independently after conversion:
   1. Convert PDFs → markdown/ (pure marker)
@@ -26,29 +26,50 @@ from convert import console, select_menu, select_menu_multi, _format_size
 MARKDOWN_DIR = Path("markdown")
 ENHANCED_DIR = Path("enhanced")
 
+# ── Provider ─────────────────────────────────────────────────────
+
+PROVIDERS = {
+    "openrouter": {"name": "OpenRouter", "env_key": "OPENROUTER_API_KEY",
+                    "hint": "export OPENROUTER_API_KEY=sk-or-..."},
+    "poe":        {"name": "Poe",        "env_key": "POE_API_KEY",
+                    "hint": "export POE_API_KEY=... (from poe.com/api_key)"},
+}
+
+
+def check_provider_key(provider: str) -> bool:
+    """Check if the API key for a provider is set. Print error if not."""
+    info = PROVIDERS[provider]
+    if os.environ.get(info["env_key"]):
+        return True
+    console.print(f"\n[red bold]✗ {info['env_key']} not set.[/red bold]")
+    console.print(f"  Export it first:  [cyan]{info['hint']}[/cyan]")
+    return False
+
+
+def select_provider(show_back: bool = True) -> str | None:
+    """Let user pick API provider. Returns 'openrouter'/'poe' or None (back)."""
+    options = []
+    for key, info in PROVIDERS.items():
+        has_key = "✓" if os.environ.get(info["env_key"]) else "✗"
+        options.append(f"{info['name']:12s}  [{has_key} {info['env_key']}]")
+    idx = select_menu("API provider:", options, show_back=show_back)
+    if idx is None:
+        return None
+    return list(PROVIDERS.keys())[idx]
+
+
 # ── Models ───────────────────────────────────────────────────────
 
-MODELS_FILE = Path(__file__).parent / "models.json"
-
-
-def _load_models() -> list[str]:
-    """Load model IDs from models.json."""
+def _load_json_list(filename: str) -> list[str]:
+    """Load a JSON string array from a file."""
     import json
-    return json.loads(MODELS_FILE.read_text(encoding="utf-8"))
+    path = Path(__file__).parent / filename
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
-MODELS = _load_models()
-
-PDF_MODELS_FILE = Path(__file__).parent / "pdf_models.json"
-
-
-def _load_pdf_models() -> list[str]:
-    """Load model for PDF conversion IDs from pdf_models.json."""
-    import json
-    return json.loads(PDF_MODELS_FILE.read_text(encoding="utf-8"))
-
-
-PDF_MODELS = _load_pdf_models()
+MODELS = _load_json_list("models.json")
+PDF_MODELS = _load_json_list("pdf_models.json")
+POE_MODELS = _load_json_list("poe_models.json")
 
 
 # ── Pricing (cached locally, updated via `make pricing`) ─────────
@@ -373,7 +394,21 @@ def select_model(est_prompt: int = 0, est_completion: int = 0) -> tuple[str, str
     return model_id, model_id.split("/")[-1]
 
 
-# ── API Call ─────────────────────────────────────────────────────
+def select_poe_model() -> tuple[str, str] | None:
+    """Select a Poe bot. Returns (bot_name, display_name) or None (back).
+
+    Poe uses bot names directly (e.g. 'GPT-4o', 'Claude-3.5-Sonnet').
+    No pricing info (Poe uses subscription points).
+    """
+    options = [f"{m}" for m in POE_MODELS]
+    idx = select_menu("Select Poe bot:", options, show_back=True)
+    if idx is None:
+        return None
+    bot = POE_MODELS[idx]
+    return bot, bot
+
+
+# ── API Call (OpenRouter) ────────────────────────────────────────
 
 def call_api(text: str, mode: str, model_id: str, quiet: bool = False) -> tuple[str, dict]:
     """Send markdown to OpenRouter API with exponential backoff retry.
@@ -458,6 +493,249 @@ def call_api_chunked(text: str, mode: str, model_id: str, chunk_limit: int = 600
     return "\n\n".join(results), total_usage
 
 
+# ── Poe API Call ─────────────────────────────────────────────────
+
+def _call_poe(text: str, mode: str, bot_name: str,
+              quiet: bool = False) -> tuple[str, dict]:
+    """Send markdown to Poe API via fastapi_poe.
+
+    Uses get_bot_response_sync (synchronous streaming).
+    Returns (result_text, usage_dict).
+    """
+    import fastapi_poe as fp
+
+    api_key = os.environ.get("POE_API_KEY", "")
+    prompt = PROMPTS[mode]
+
+    messages = [
+        fp.ProtocolMessage(role="system", content=prompt),
+        fp.ProtocolMessage(role="user", content=text),
+    ]
+
+    delays = [1, 2, 4, 8, 16, 32]
+    last_err = None
+
+    for attempt in range(len(delays) + 1):
+        try:
+            result_parts = []
+            for partial in fp.get_bot_response_sync(
+                messages=messages,
+                bot_name=bot_name,
+                api_key=api_key,
+                temperature=0.1 if mode == "cleanup" else 0.3,
+            ):
+                result_parts.append(partial.text)
+
+            result_text = "".join(result_parts)
+
+            # Poe doesn't return token counts — estimate from text
+            usage = empty_usage()
+            usage["prompt_tokens"] = max(1, len(text) // 4)
+            usage["completion_tokens"] = max(1, len(result_text) // 4)
+            usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
+
+            return result_text, usage
+
+        except Exception as e:
+            last_err = e
+            if attempt < len(delays):
+                wait = delays[attempt]
+                if not quiet:
+                    console.print(f"  [yellow]⚠ Poe API error, retry in {wait}s: {e}[/yellow]")
+                time.sleep(wait)
+            else:
+                raise last_err
+
+
+def _call_poe_chunked(text: str, mode: str, bot_name: str,
+                      chunk_limit: int = 60000,
+                      quiet: bool = False) -> tuple[str, dict]:
+    """For large files, split by # headings and process each chunk via Poe."""
+    if len(text) <= chunk_limit:
+        return _call_poe(text, mode, bot_name, quiet=quiet)
+
+    sections = re.split(r'(?=^# )', text, flags=re.MULTILINE)
+    sections = [s for s in sections if s.strip()]
+
+    chunks = []
+    current = ""
+    for section in sections:
+        if len(current) + len(section) > chunk_limit and current:
+            chunks.append(current)
+            current = section
+        else:
+            current += section
+    if current:
+        chunks.append(current)
+
+    if not quiet:
+        console.print(f"    [dim]split into {len(chunks)} chunks for Poe API[/dim]")
+
+    results = []
+    total_usage = empty_usage()
+    for i, chunk in enumerate(chunks):
+        if not quiet:
+            console.print(f"    [dim]chunk {i+1}/{len(chunks)} ({len(chunk)//1000}K chars)...[/dim]")
+        result, usage = _call_poe(chunk, mode, bot_name, quiet=quiet)
+        results.append(result)
+        for k in total_usage:
+            total_usage[k] += usage[k]
+
+    return "\n\n".join(results), total_usage
+
+
+def _call_poe_with_attachment(file_bytes: bytes, filename: str,
+                              bot_name: str, prompt: str,
+                              quiet: bool = False) -> tuple[str, dict]:
+    """Send a file (PDF/images) to Poe via attachment upload.
+
+    Uploads file → gets Attachment → sends message with attachment.
+    Returns (markdown_text, usage_dict).
+    """
+    import fastapi_poe as fp
+
+    api_key = os.environ.get("POE_API_KEY", "")
+
+    delays = [1, 2, 4, 8, 16, 32]
+    last_err = None
+
+    for attempt in range(len(delays) + 1):
+        try:
+            # Upload file to Poe
+            attachment = fp.upload_file_sync(
+                file=file_bytes,
+                file_name=filename,
+                api_key=api_key,
+            )
+
+            # Send message with attachment
+            messages = [
+                fp.ProtocolMessage(
+                    role="user",
+                    content=prompt,
+                    attachments=[attachment],
+                ),
+            ]
+
+            result_parts = []
+            for partial in fp.get_bot_response_sync(
+                messages=messages,
+                bot_name=bot_name,
+                api_key=api_key,
+                temperature=0.1,
+            ):
+                result_parts.append(partial.text)
+
+            result_text = "".join(result_parts)
+
+            usage = empty_usage()
+            usage["prompt_tokens"] = max(1, len(prompt) // 4)
+            usage["completion_tokens"] = max(1, len(result_text) // 4)
+            usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
+
+            return result_text, usage
+
+        except Exception as e:
+            last_err = e
+            if attempt < len(delays):
+                wait = delays[attempt]
+                if not quiet:
+                    console.print(f"  [yellow]⚠ Poe API error, retry in {wait}s: {e}[/yellow]")
+                time.sleep(wait)
+            else:
+                raise last_err
+
+
+# ── Unified API Dispatch ─────────────────────────────────────────
+
+def unified_call_api(text: str, mode: str, model_id: str,
+                     provider: str = "openrouter",
+                     quiet: bool = False) -> tuple[str, dict]:
+    """Route text enhancement to the chosen provider."""
+    if provider == "poe":
+        return _call_poe(text, mode, model_id, quiet=quiet)
+    else:
+        return call_api(text, mode, model_id, quiet=quiet)
+
+
+def unified_call_api_chunked(text: str, mode: str, model_id: str,
+                             provider: str = "openrouter",
+                             chunk_limit: int = 60000,
+                             quiet: bool = False) -> tuple[str, dict]:
+    """Route chunked text enhancement to the chosen provider."""
+    if provider == "poe":
+        return _call_poe_chunked(text, mode, model_id, chunk_limit, quiet=quiet)
+    else:
+        return call_api_chunked(text, mode, model_id, chunk_limit, quiet=quiet)
+
+
+def unified_call_pdf(pdf_bytes: bytes, filename: str, model_id: str,
+                     prompt: str, provider: str = "openrouter",
+                     quiet: bool = False) -> tuple[str, dict]:
+    """Route PDF file upload to the chosen provider."""
+    if provider == "poe":
+        return _call_poe_with_attachment(pdf_bytes, filename, model_id, prompt, quiet=quiet)
+    else:
+        return _call_pdf_api(pdf_bytes, filename, model_id, prompt, quiet=quiet)
+
+
+def unified_call_images(images_b64: list[str], model_id: str,
+                        prompt: str, provider: str = "openrouter",
+                        quiet: bool = False) -> tuple[str, dict]:
+    """Route image upload to the chosen provider.
+
+    For Poe, converts base64 images to bytes and uploads as attachment.
+    """
+    if provider == "poe":
+        import base64
+        # Poe: upload images as individual attachments — combine into one call
+        # For simplicity, concatenate all images into a single request
+        # Actually, upload each image and attach all to a single message
+        import fastapi_poe as fp
+
+        api_key = os.environ.get("POE_API_KEY", "")
+        attachments = []
+        for i, b64 in enumerate(images_b64):
+            img_bytes = base64.b64decode(b64)
+            att = fp.upload_file_sync(
+                file=img_bytes,
+                file_name=f"page_{i+1}.jpg",
+                api_key=api_key,
+            )
+            attachments.append(att)
+
+        delays = [1, 2, 4, 8, 16, 32]
+        last_err = None
+        for attempt in range(len(delays) + 1):
+            try:
+                messages = [
+                    fp.ProtocolMessage(role="user", content=prompt, attachments=attachments),
+                ]
+                result_parts = []
+                for partial in fp.get_bot_response_sync(
+                    messages=messages, bot_name=model_id, api_key=api_key, temperature=0.1,
+                ):
+                    result_parts.append(partial.text)
+
+                result_text = "".join(result_parts)
+                usage = empty_usage()
+                usage["prompt_tokens"] = max(1, len(prompt) // 4)
+                usage["completion_tokens"] = max(1, len(result_text) // 4)
+                usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
+                return result_text, usage
+            except Exception as e:
+                last_err = e
+                if attempt < len(delays):
+                    wait = delays[attempt]
+                    if not quiet:
+                        console.print(f"  [yellow]⚠ Poe API error, retry in {wait}s: {e}[/yellow]")
+                    time.sleep(wait)
+                else:
+                    raise last_err
+    else:
+        return _call_image_api(images_b64, model_id, prompt, quiet=quiet)
+
+
 def enhance_file(md_path: Path, mode: str, model_id: str) -> dict:
     """Read a markdown file, enhance via API, write back. Returns usage dict."""
     md_path = Path(md_path)
@@ -481,14 +759,16 @@ def enhance_file(md_path: Path, mode: str, model_id: str) -> dict:
 
 # ── Batch Enhance ────────────────────────────────────────────────
 
-def _enhance_one(md: Path, dst: Path, mode: str, model_id: str) -> dict:
+def _enhance_one(md: Path, dst: Path, mode: str, model_id: str,
+                 provider: str = "openrouter") -> dict:
     """Process a single MD file via API. Thread-safe, no console output.
 
     Returns result dict with name, status, sizes, usage, time.
     """
     text = md.read_text(encoding="utf-8")
     start = time.time()
-    enhanced_text, usage = call_api_chunked(text, mode, model_id, quiet=True)
+    enhanced_text, usage = unified_call_api_chunked(text, mode, model_id,
+                                                    provider=provider, quiet=True)
     elapsed = time.time() - start
     dst.write_text(enhanced_text, encoding="utf-8")
     return {
@@ -535,7 +815,8 @@ def _resolve_conflicts(tasks: list[tuple[Path, Path]]) -> tuple[list[tuple[Path,
     return resolved, skipped
 
 
-def enhance_all(source: dict, output_dir: Path, mode: str, model_id: str) -> list[dict]:
+def enhance_all(source: dict, output_dir: Path, mode: str, model_id: str,
+                provider: str = "openrouter") -> list[dict]:
     """Enhance all MDs from a source, save to output_dir.
 
     Naming: files get _mode suffix, folders keep original name.
@@ -578,7 +859,7 @@ def enhance_all(source: dict, output_dir: Path, mode: str, model_id: str) -> lis
                       f"[dim]({_format_size(md.stat().st_size)}, ~{est['total_tokens']:,} tokens)[/dim]")
         try:
             api_start = time.time()
-            enhanced_text, usage = call_api_chunked(text, mode, model_id)
+            enhanced_text, usage = unified_call_api_chunked(text, mode, model_id, provider=provider)
             api_time = time.time() - api_start
             dst.write_text(enhanced_text, encoding="utf-8")
 
@@ -618,7 +899,7 @@ def enhance_all(source: dict, output_dir: Path, mode: str, model_id: str) -> lis
             future_to_info = {}
             with ThreadPoolExecutor(max_workers=n) as executor:
                 for md, dst in tasks:
-                    future = executor.submit(_enhance_one, md, dst, mode, model_id)
+                    future = executor.submit(_enhance_one, md, dst, mode, model_id, provider)
                     future_to_info[future] = (md, dst)
 
                 done_count = 0
@@ -932,6 +1213,7 @@ def convert_pdf_via_api(
     model_id: str,
     input_method: str = "pdf",
     pages_per_batch: int = 30,
+    provider: str = "openrouter",
     index: int | None = None,
     total: int | None = None,
 ) -> dict:
@@ -946,9 +1228,10 @@ def convert_pdf_via_api(
     Args:
         pdf_path: Path to PDF
         output_dir: Directory to save output (creates stem/ subdirectory)
-        model_id: OpenRouter model ID
+        model_id: Model ID (OpenRouter) or bot name (Poe)
         input_method: "pdf" (default) or "image"
         pages_per_batch: Max pages per API call (default 30 for PDF, 10 for image)
+        provider: "openrouter" or "poe"
         index/total: For display (e.g. [2/5])
 
     Returns: stats dict (same shape as convert_single for compatibility)
@@ -1011,7 +1294,7 @@ def convert_pdf_via_api(
                     f"Do not repeat content from previous batches."
                 )
 
-            result_text, usage = _call_pdf_api(pdf_bytes, fname, model_id, batch_prompt)
+            result_text, usage = unified_call_pdf(pdf_bytes, fname, model_id, batch_prompt, provider=provider)
             md_parts.append(result_text)
 
             for k in total_usage:
@@ -1046,7 +1329,7 @@ def convert_pdf_via_api(
                     f"Do not repeat content from previous batches."
                 )
 
-            result_text, usage = _call_image_api(batch_images, model_id, batch_prompt)
+            result_text, usage = unified_call_images(batch_images, model_id, batch_prompt, provider=provider)
             md_parts.append(result_text)
 
             for k in total_usage:
@@ -1104,19 +1387,14 @@ def enhance_interactive():
     """Full interactive flow with step-based navigation (← Back supported).
 
     Steps:
-      0: Selection mode (single/multi) — only if >1 source
-      1: Select source(s)
-      2: Enhancement mode
-      3: Select model
-      4: Confirm plan
-      5: Execute enhancement
+      0: Select provider (OpenRouter / Poe)
+      1: Selection mode (single/multi) — only if >1 source
+      2: Select source(s)
+      3: Enhancement mode
+      4: Select model
+      5: Confirm plan
+      6: Execute enhancement
     """
-    # Check API key upfront
-    if not os.environ.get("OPENROUTER_API_KEY"):
-        console.print("\n[red bold]✗ OPENROUTER_API_KEY not set.[/red bold]")
-        console.print("  Export it first:  [cyan]export OPENROUTER_API_KEY=sk-or-...[/cyan]")
-        return
-
     sources = scan_md_sources()
 
     if not sources:
@@ -1138,6 +1416,7 @@ def enhance_interactive():
         )
 
     # State variables
+    provider = None
     use_multi = False
     selected_list = None
     mode = None
@@ -1146,11 +1425,21 @@ def enhance_interactive():
 
     step = 0
     while True:
-        # ── Step 0: Selection mode ───────────────────────────────
+        # ── Step 0: Select provider ──────────────────────────────
         if step == 0:
+            provider = select_provider(show_back=True)
+            if provider is None:
+                return  # back to main menu
+            if not check_provider_key(provider):
+                continue  # re-show provider selection
+            step = 1
+            continue
+
+        # ── Step 1: Selection mode ───────────────────────────────
+        elif step == 1:
             if len(sources) <= 1:
                 use_multi = False
-                step = 1
+                step = 2
                 continue
 
             sel = select_menu("Selection mode:", [
@@ -1159,33 +1448,33 @@ def enhance_interactive():
             ], show_back=True)
 
             if sel is None:
-                return  # back to main menu
+                step = 0; continue
             use_multi = sel == 1
-            step = 1
+            step = 2
             continue
 
-        # ── Step 1: Select source(s) ─────────────────────────────
-        elif step == 1:
+        # ── Step 2: Select source(s) ─────────────────────────────
+        elif step == 2:
             if use_multi:
                 indices = select_menu_multi("Select sources to enhance:", options)
                 if not indices:
                     if len(sources) <= 1:
-                        return  # only 1 source, back = main menu
-                    step = 0; continue
+                        step = 0; continue
+                    step = 1; continue
                 selected_list = [sources[i] for i in indices]
             else:
                 idx = select_menu("Select source to enhance:", options, show_back=True)
                 if idx is None:
                     if len(sources) <= 1:
-                        return
-                    step = 0; continue
+                        step = 0; continue
+                    step = 1; continue
                 selected_list = [sources[idx]]
 
-            step = 2
+            step = 3
             continue
 
-        # ── Step 2: Enhancement mode ─────────────────────────────
-        elif step == 2:
+        # ── Step 3: Enhancement mode ─────────────────────────────
+        elif step == 3:
             total_est_cleanup = sum(s["est_tokens_cleanup"] for s in selected_list)
             total_est_rewrite = sum(s["est_tokens_rewrite"] for s in selected_list)
             total_est_study = sum(s["est_tokens_study"] for s in selected_list)
@@ -1198,7 +1487,7 @@ def enhance_interactive():
                 est_tutorial=total_est_tutorial,
             )
             if mode is None:
-                step = 1; continue
+                step = 2; continue
 
             # Show mode info
             est_key = f"est_tokens_{mode}"
@@ -1206,41 +1495,54 @@ def enhance_interactive():
             console.print(f"\n🔧 Mode [bold]{mode}[/bold] — {MODES[mode]}")
             console.print(f"📊 Estimated tokens: [yellow bold]~{total_est:,}[/yellow bold]")
 
-            # Show cost range across all enhance models
-            est_detail = estimate_tokens("x" * total_est * 4, mode)  # rough split
-            costs = [estimate_cost(est_detail["prompt_tokens"], est_detail["completion_tokens"], m) for m in MODELS]
-            if costs:
-                lo, hi = min(costs), max(costs)
-                console.print(f"💰 Estimated cost: [green]{format_cost(lo)}[/green] ~ [yellow]{format_cost(hi)}[/yellow]")
-
-            step = 3
-            continue
-
-        # ── Step 3: Select model ─────────────────────────────────
-        elif step == 3:
-            # Calculate token estimates for cost display
-            est_key_2 = f"est_tokens_{mode}"
-            total_est_2 = sum(s[est_key_2] for s in selected_list)
-            est_detail_2 = estimate_tokens("x" * total_est_2 * 4, mode)
-
-            result = select_model(
-                est_prompt=est_detail_2["prompt_tokens"],
-                est_completion=est_detail_2["completion_tokens"],
-            )
-            if result is None:
-                step = 2; continue
-            model_id, model_name = result
-
-            est_cost = estimate_cost(est_detail_2["prompt_tokens"], est_detail_2["completion_tokens"], model_id)
-            console.print(f"  🤖 [cyan]{model_name}[/cyan]  💰 ~[yellow]{format_cost(est_cost)}[/yellow]")
+            # Show cost range (only for OpenRouter — Poe uses subscription points)
+            if provider == "openrouter":
+                est_detail = estimate_tokens("x" * total_est * 4, mode)
+                costs = [estimate_cost(est_detail["prompt_tokens"], est_detail["completion_tokens"], m) for m in MODELS]
+                if costs:
+                    lo, hi = min(costs), max(costs)
+                    console.print(f"💰 Estimated cost: [green]{format_cost(lo)}[/green] ~ [yellow]{format_cost(hi)}[/yellow]")
+            else:
+                console.print(f"💰 Poe: uses subscription compute points")
 
             step = 4
             continue
 
-        # ── Step 4: Confirm plan ─────────────────────────────────
+        # ── Step 4: Select model ─────────────────────────────────
         elif step == 4:
+            if provider == "poe":
+                result = select_poe_model()
+            else:
+                # Calculate token estimates for cost display
+                est_key_2 = f"est_tokens_{mode}"
+                total_est_2 = sum(s[est_key_2] for s in selected_list)
+                est_detail_2 = estimate_tokens("x" * total_est_2 * 4, mode)
+                result = select_model(
+                    est_prompt=est_detail_2["prompt_tokens"],
+                    est_completion=est_detail_2["completion_tokens"],
+                )
+
+            if result is None:
+                step = 3; continue
+            model_id, model_name = result
+
+            if provider == "openrouter":
+                est_key_2 = f"est_tokens_{mode}"
+                total_est_2 = sum(s[est_key_2] for s in selected_list)
+                est_detail_2 = estimate_tokens("x" * total_est_2 * 4, mode)
+                est_cost = estimate_cost(est_detail_2["prompt_tokens"], est_detail_2["completion_tokens"], model_id)
+                console.print(f"  🤖 [cyan]{model_name}[/cyan]  💰 ~[yellow]{format_cost(est_cost)}[/yellow]")
+            else:
+                console.print(f"  🤖 [cyan]{model_name}[/cyan]  (Poe)")
+
+            step = 5
+            continue
+
+        # ── Step 5: Confirm plan ─────────────────────────────────
+        elif step == 5:
+            provider_label = PROVIDERS[provider]["name"]
             total_files = sum(len(s["md_files"]) for s in selected_list)
-            console.print(f"\n📋 [bold]{len(selected_list)} source{'s' if len(selected_list) > 1 else ''}, {total_files} files:[/bold]")
+            console.print(f"\n📋 [bold]{len(selected_list)} source{'s' if len(selected_list) > 1 else ''}, {total_files} files via {provider_label}:[/bold]")
             for s in selected_list:
                 if s["type"] == "dir":
                     out = ENHANCED_DIR / s["name"]
@@ -1256,7 +1558,7 @@ def enhance_interactive():
             try:
                 confirm = input("Proceed? [Y/n/b(ack)]: ").strip().lower()
                 if confirm in ("b", "back"):
-                    step = 3; continue
+                    step = 4; continue
                 if confirm and confirm not in ("y", "yes", ""):
                     console.print("[dim]Cancelled.[/dim]")
                     return
@@ -1264,18 +1566,18 @@ def enhance_interactive():
                 console.print("[dim]Cancelled.[/dim]")
                 return
 
-            step = 5
+            step = 6
             continue
 
-        # ── Step 5: Execute enhancement ──────────────────────────
-        elif step == 5:
+        # ── Step 6: Execute enhancement ──────────────────────────
+        elif step == 6:
             for s in selected_list:
                 if s["type"] == "dir":
                     output_dir = ENHANCED_DIR / s["name"]
                 else:
                     output_dir = ENHANCED_DIR / f"{Path(s['name']).stem}_{mode}.md"
 
-                enhance_all(s, output_dir, mode, model_id)
+                enhance_all(s, output_dir, mode, model_id, provider=provider)
 
                 console.print(f"\n[bold]Enhanced output:[/bold] [cyan]{output_dir}[/cyan]")
                 if s["type"] == "dir":

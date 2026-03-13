@@ -10,8 +10,9 @@
 # 1. 安装环境
 make setup
 
-# 2. (可选) 配置 API key
-export OPENROUTER_API_KEY=sk-or-v1-your-key-here
+# 2. (可选) 配置 API key（二选一或都配）
+export OPENROUTER_API_KEY=sk-or-v1-your-key-here   # OpenRouter
+export POE_API_KEY=your-poe-api-key                 # Poe (poe.com/api_key)
 
 # 3. 启动
 make run
@@ -23,8 +24,9 @@ make run
 # 1. 安装环境
 setup.bat
 
-# 2. (可选) 配置 API key
+# 2. (可选) 配置 API key（二选一或都配）
 set OPENROUTER_API_KEY=sk-or-v1-your-key-here
+set POE_API_KEY=your-poe-api-key
 
 # 3. 启动
 run.bat

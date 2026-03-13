@@ -4,6 +4,9 @@ marker-pdf>=1.6
 # API calls (OpenRouter via OpenAI-compatible SDK)
 openai>=1.0
 
+# API calls (Poe via official SDK)
+fastapi-poe>=0.0.80
+
 # Terminal UI
 rich>=13.0
 simple-term-menu>=1.0

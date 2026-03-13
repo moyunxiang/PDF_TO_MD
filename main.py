@@ -86,6 +86,7 @@ def do_convert():
     disable_ocr = None
     perf = None
     # API-specific state
+    api_provider = None    # "openrouter" or "poe"
     api_model_id = None
     api_model_name = None
     api_input_method = "pdf"
@@ -182,35 +183,50 @@ def do_convert():
             step = 10  # → execute local
             continue
 
-        # ── Step 5: Select model (API only) ─────────────────────
+        # ── Step 5: Select provider + model (API only) ──────────
         elif step == 5:
-            import os
-            if not os.environ.get("OPENROUTER_API_KEY"):
-                console.print("\n[red bold]✗ OPENROUTER_API_KEY not set.[/red bold]")
-                console.print("  Export it first:  [cyan]export OPENROUTER_API_KEY=sk-or-...[/cyan]")
-                step = 0; continue
+            from api import (select_provider, check_provider_key,
+                             select_pdf_model, select_poe_model,
+                             estimate_cost, format_cost)
+
+            # 5a: Select provider
+            if api_provider is None:
+                api_provider = select_provider(show_back=True)
+                if api_provider is None:
+                    step = 1; continue
+                if not check_provider_key(api_provider):
+                    api_provider = None
+                    continue  # re-show provider selection
 
             scan = _scan_pdfs(selected)
+            provider_name = "OpenRouter" if api_provider == "openrouter" else "Poe"
             console.print(Panel(
                 f"📚 [bold]{len(selected)}[/bold] PDF{'s' if len(selected) > 1 else ''} "
                 f"({_format_size(scan['total_size'])})\n"
-                f"📄 [yellow]{scan['total_pages']}[/yellow] pages total",
+                f"📄 [yellow]{scan['total_pages']}[/yellow] pages total\n"
+                f"🔌 Provider: [cyan]{provider_name}[/cyan]",
                 title="[bold]PDF → Markdown (API)[/bold]", border_style="green",
             ))
 
-            from api import select_pdf_model, estimate_cost, format_cost
+            # 5b: Select model
+            if api_provider == "poe":
+                result = select_poe_model()
+            else:
+                # Rough token estimate: ~800 prompt + ~400 completion per page
+                est_prompt = scan["total_pages"] * 800
+                est_completion = scan["total_pages"] * 400
+                result = select_pdf_model(est_prompt=est_prompt, est_completion=est_completion)
 
-            # Rough token estimate: ~800 prompt + ~400 completion per page
-            est_prompt = scan["total_pages"] * 800
-            est_completion = scan["total_pages"] * 400
-
-            result = select_pdf_model(est_prompt=est_prompt, est_completion=est_completion)
             if result is None:
-                step = 1; continue
+                api_provider = None  # go back to provider selection
+                continue
             api_model_id, api_model_name = result
 
-            est_cost = estimate_cost(est_prompt, est_completion, api_model_id)
-            console.print(f"  🤖 [cyan]{api_model_name}[/cyan]  💰 ~[yellow]{format_cost(est_cost)}[/yellow]")
+            if api_provider == "openrouter":
+                est_cost = estimate_cost(est_prompt, est_completion, api_model_id)
+                console.print(f"  🤖 [cyan]{api_model_name}[/cyan]  💰 ~[yellow]{format_cost(est_cost)}[/yellow]")
+            else:
+                console.print(f"  🤖 [cyan]{api_model_name}[/cyan]  (Poe)")
 
             step = 6
             continue
@@ -277,6 +293,7 @@ def do_convert():
                         pdf, out_dir, api_model_id,
                         input_method=api_input_method,
                         pages_per_batch=batch_size,
+                        provider=api_provider,
                         index=i, total=len(selected),
                     )
                     results.append(stats)
