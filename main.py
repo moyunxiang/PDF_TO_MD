@@ -209,8 +209,12 @@ def do_convert():
             ))
 
             # 5b: Select model
+            # Estimate API calls: ~1 msg per 30 pages (PDF) or 10 pages (image)
+            est_msgs = max(1, (scan["total_pages"] + 29) // 30)
+
             if api_provider == "poe":
-                result = select_poe_model()
+                from api import select_poe_model, _poe_points
+                result = select_poe_model(est_messages=est_msgs)
             else:
                 # Rough token estimate: ~800 prompt + ~400 completion per page
                 est_prompt = scan["total_pages"] * 800
@@ -226,7 +230,10 @@ def do_convert():
                 est_cost = estimate_cost(est_prompt, est_completion, api_model_id)
                 console.print(f"  🤖 [cyan]{api_model_name}[/cyan]  💰 ~[yellow]{format_cost(est_cost)}[/yellow]")
             else:
-                console.print(f"  🤖 [cyan]{api_model_name}[/cyan]  (Poe)")
+                pts = _poe_points(api_model_id)
+                est_pts = pts * est_msgs if pts else 0
+                pts_str = f"  💰 ~{est_pts:,} pts ({est_msgs} msgs)" if est_pts else ""
+                console.print(f"  🤖 [cyan]{api_model_name}[/cyan]{pts_str}")
 
             step = 6
             continue

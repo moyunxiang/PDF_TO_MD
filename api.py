@@ -37,8 +37,18 @@ PROVIDERS = {
 
 
 def check_provider_key(provider: str) -> bool:
-    """Check if the API key for a provider is set. Print error if not."""
+    """Check if the API key and SDK for a provider are available. Print error if not."""
     info = PROVIDERS[provider]
+
+    # Check SDK installed (Poe needs fastapi-poe)
+    if provider == "poe":
+        try:
+            import fastapi_poe  # noqa: F401
+        except ImportError:
+            console.print("\n[red bold]✗ fastapi-poe not installed.[/red bold]")
+            console.print("  Install it first:  [cyan]pip install fastapi-poe[/cyan]")
+            return False
+
     if os.environ.get(info["env_key"]):
         return True
     console.print(f"\n[red bold]✗ {info['env_key']} not set.[/red bold]")
@@ -60,8 +70,8 @@ def select_provider(show_back: bool = True) -> str | None:
 
 # ── Models ───────────────────────────────────────────────────────
 
-def _load_json_list(filename: str) -> list[str]:
-    """Load a JSON string array from a file."""
+def _load_json_list(filename: str) -> list:
+    """Load a JSON array from a file."""
     import json
     path = Path(__file__).parent / filename
     return json.loads(path.read_text(encoding="utf-8"))
@@ -70,6 +80,18 @@ def _load_json_list(filename: str) -> list[str]:
 MODELS = _load_json_list("models.json")
 PDF_MODELS = _load_json_list("pdf_models.json")
 POE_MODELS = _load_json_list("poe_models.json")
+
+# Poe compute points per message (loaded from poe_pricing.json)
+def _load_poe_pricing() -> dict[str, int]:
+    """Load Poe points-per-message from poe_pricing.json."""
+    import json
+    path = Path(__file__).parent / "poe_pricing.json"
+    if not path.exists():
+        return {}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return {k: v for k, v in data.items() if not k.startswith("_")}
+
+POE_PRICING: dict[str, int] = _load_poe_pricing()
 
 
 # ── Pricing (cached locally, updated via `make pricing`) ─────────
@@ -197,6 +219,21 @@ def format_cost(cost: float) -> str:
         return f"${cost:.2f}"
 
 
+def _cost_tag(prompt_tokens: int, completion_tokens: int, model_id: str,
+              poe_points: int = 0) -> str:
+    """Return '💰 $X.XX' or '💰 X pts' string, or empty if no pricing.
+
+    For OpenRouter: shows dollar cost from MODEL_PRICING.
+    For Poe: shows compute points if poe_points > 0.
+    """
+    cost = estimate_cost(prompt_tokens, completion_tokens, model_id)
+    if cost > 0:
+        return f"  💰 [green]{format_cost(cost)}[/green]"
+    if poe_points > 0:
+        return f"  💰 [green]{poe_points:,} pts[/green]"
+    return ""
+
+
 MODES = {
     "cleanup": "Format cleanup (keep content, fix formatting)",
     "rewrite": "Understand + rewrite (reorganize into study guide)",
@@ -223,7 +260,7 @@ PROMPTS = _load_prompts()
 
 def empty_usage() -> dict:
     """Return a zeroed token usage dict."""
-    return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "poe_points": 0}
 
 
 def estimate_tokens(text: str, mode: str = "cleanup") -> dict:
@@ -394,13 +431,26 @@ def select_model(est_prompt: int = 0, est_completion: int = 0) -> tuple[str, str
     return model_id, model_id.split("/")[-1]
 
 
-def select_poe_model() -> tuple[str, str] | None:
+def _poe_points(bot_name: str) -> int:
+    """Get compute points per message for a Poe bot. Returns 0 if unknown."""
+    return POE_PRICING.get(bot_name, 0)
+
+
+def select_poe_model(est_messages: int = 0) -> tuple[str, str] | None:
     """Select a Poe bot. Returns (bot_name, display_name) or None (back).
 
-    Poe uses bot names directly (e.g. 'GPT-4o', 'Claude-3.5-Sonnet').
-    No pricing info (Poe uses subscription points).
+    If est_messages provided, shows estimated total compute points per bot.
     """
-    options = [f"{m}" for m in POE_MODELS]
+    options = []
+    for bot in POE_MODELS:
+        pts = POE_PRICING.get(bot, 0)
+        if est_messages and pts:
+            total_pts = pts * est_messages
+            options.append(f"{bot:24s}  ~{total_pts:,} pts  ({pts} pts/msg)")
+        elif pts:
+            options.append(f"{bot:24s}  {pts} pts/msg")
+        else:
+            options.append(bot)
     idx = select_menu("Select Poe bot:", options, show_back=True)
     if idx is None:
         return None
@@ -533,6 +583,7 @@ def _call_poe(text: str, mode: str, bot_name: str,
             usage["prompt_tokens"] = max(1, len(text) // 4)
             usage["completion_tokens"] = max(1, len(result_text) // 4)
             usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
+            usage["poe_points"] = _poe_points(bot_name)  # 1 message = 1x points
 
             return result_text, usage
 
@@ -632,6 +683,7 @@ def _call_poe_with_attachment(file_bytes: bytes, filename: str,
             usage["prompt_tokens"] = max(1, len(prompt) // 4)
             usage["completion_tokens"] = max(1, len(result_text) // 4)
             usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
+            usage["poe_points"] = _poe_points(bot_name)
 
             return result_text, usage
 
@@ -722,6 +774,7 @@ def unified_call_images(images_b64: list[str], model_id: str,
                 usage["prompt_tokens"] = max(1, len(prompt) // 4)
                 usage["completion_tokens"] = max(1, len(result_text) // 4)
                 usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
+                usage["poe_points"] = _poe_points(model_id)
                 return result_text, usage
             except Exception as e:
                 last_err = e
@@ -747,11 +800,10 @@ def enhance_file(md_path: Path, mode: str, model_id: str) -> dict:
 
     text, usage = call_api_chunked(text, mode, model_id)
 
-    file_cost = estimate_cost(usage["prompt_tokens"], usage["completion_tokens"], model_id)
     console.print(f"  ├ [blue]API:[/blue]     [yellow]{usage['prompt_tokens']:,}[/yellow] prompt + "
                   f"[yellow]{usage['completion_tokens']:,}[/yellow] completion = "
-                  f"[yellow bold]{usage['total_tokens']:,}[/yellow bold] tokens  "
-                  f"💰 [green]{format_cost(file_cost)}[/green]")
+                  f"[yellow bold]{usage['total_tokens']:,}[/yellow bold] tokens"
+                  f"{_cost_tag(usage['prompt_tokens'], usage['completion_tokens'], model_id, usage.get('poe_points', 0))}")
 
     md_path.write_text(text, encoding="utf-8")
     return usage
@@ -863,11 +915,10 @@ def enhance_all(source: dict, output_dir: Path, mode: str, model_id: str,
             api_time = time.time() - api_start
             dst.write_text(enhanced_text, encoding="utf-8")
 
-            single_cost = estimate_cost(usage["prompt_tokens"], usage["completion_tokens"], model_id)
             console.print(f"  ├ [blue]tokens:[/blue]  [yellow]{usage['prompt_tokens']:,}[/yellow] prompt + "
                           f"[yellow]{usage['completion_tokens']:,}[/yellow] completion = "
-                          f"[yellow bold]{usage['total_tokens']:,}[/yellow bold]  "
-                          f"💰 [green]{format_cost(single_cost)}[/green]")
+                          f"[yellow bold]{usage['total_tokens']:,}[/yellow bold]"
+                          f"{_cost_tag(usage['prompt_tokens'], usage['completion_tokens'], model_id, usage.get('poe_points', 0))}")
             console.print(f"  └ [green]saved:[/green]  {dst}  [dim]{api_time:.1f}s[/dim]")
             results.append({
                 "name": dst.name, "status": "ok",
@@ -909,11 +960,11 @@ def enhance_all(source: dict, output_dir: Path, mode: str, model_id: str,
                         result = future.result()
                         progress.stop()
                         done_count += 1
-                        par_cost = estimate_cost(result["usage"]["prompt_tokens"], result["usage"]["completion_tokens"], result.get("model_id", ""))
+                        cost_str = _cost_tag(result["usage"]["prompt_tokens"], result["usage"]["completion_tokens"], result.get("model_id", ""), result["usage"].get("poe_points", 0))
                         console.print(
                             f"  [green]✓[/green] [{done_count}/{n}] [cyan]{result['name']}[/cyan]  "
-                            f"[yellow]{result['usage']['total_tokens']:,}[/yellow] tokens  "
-                            f"💰 [green]{format_cost(par_cost)}[/green]  "
+                            f"[yellow]{result['usage']['total_tokens']:,}[/yellow] tokens"
+                            f"{cost_str}  "
                             f"[dim]{result['time']:.1f}s[/dim]"
                         )
                         results.append(result)
@@ -966,11 +1017,14 @@ def _print_enhance_summary(results: list[dict], total_elapsed: float, mode: str)
             f"[yellow]{total_usage['completion_tokens']:,}[/yellow] completion = "
             f"[yellow bold]{total_usage['total_tokens']:,}[/yellow bold] total"
         )
-        # Add cost if model_id is available in results
+        # Add cost if model_id is available and pricing exists
         first_ok = ok[0]
         if "model_id" in first_ok:
             total_cost = estimate_cost(total_usage["prompt_tokens"], total_usage["completion_tokens"], first_ok["model_id"])
-            panel_lines.append(f"💰 Cost: [green bold]{format_cost(total_cost)}[/green bold]")
+            if total_cost > 0:
+                panel_lines.append(f"💰 Cost: [green bold]{format_cost(total_cost)}[/green bold]")
+            elif total_usage.get("poe_points", 0) > 0:
+                panel_lines.append(f"💰 Poe points: [green bold]{total_usage['poe_points']:,} pts[/green bold]")
 
     console.print()
     console.print(Panel("\n".join(panel_lines), title=f"[bold]Enhancement Summary ({mode})[/bold]", border_style="green"))
@@ -1299,8 +1353,8 @@ def convert_pdf_via_api(
 
             for k in total_usage:
                 total_usage[k] += usage[k]
-            batch_cost = estimate_cost(usage["prompt_tokens"], usage["completion_tokens"], model_id)
-            console.print(f"  │         [yellow]{usage['total_tokens']:,}[/yellow] tokens  💰 [green]{format_cost(batch_cost)}[/green]")
+            console.print(f"  │         [yellow]{usage['total_tokens']:,}[/yellow] tokens"
+                          f"{_cost_tag(usage['prompt_tokens'], usage['completion_tokens'], model_id, usage.get('poe_points', 0))}")
 
     else:
         # ── Image mode (fallback) ───────────────────────────────
@@ -1334,8 +1388,8 @@ def convert_pdf_via_api(
 
             for k in total_usage:
                 total_usage[k] += usage[k]
-            batch_cost = estimate_cost(usage["prompt_tokens"], usage["completion_tokens"], model_id)
-            console.print(f"  │         [yellow]{usage['total_tokens']:,}[/yellow] tokens  💰 [green]{format_cost(batch_cost)}[/green]")
+            console.print(f"  │         [yellow]{usage['total_tokens']:,}[/yellow] tokens"
+                          f"{_cost_tag(usage['prompt_tokens'], usage['completion_tokens'], model_id, usage.get('poe_points', 0))}")
 
     # ── Combine and save ─────────────────────────────────────────
     combined_md = "\n\n".join(md_parts)
@@ -1357,11 +1411,10 @@ def convert_pdf_via_api(
     out_lines = len(combined_md.splitlines())
     elapsed = time.time() - start
 
-    total_cost = estimate_cost(total_usage["prompt_tokens"], total_usage["completion_tokens"], model_id)
     console.print(f"  ├ [blue]tokens:[/blue]  [yellow]{total_usage['prompt_tokens']:,}[/yellow] prompt + "
                   f"[yellow]{total_usage['completion_tokens']:,}[/yellow] completion = "
-                  f"[yellow bold]{total_usage['total_tokens']:,}[/yellow bold]  "
-                  f"💰 [green]{format_cost(total_cost)}[/green]")
+                  f"[yellow bold]{total_usage['total_tokens']:,}[/yellow bold]"
+                  f"{_cost_tag(total_usage['prompt_tokens'], total_usage['completion_tokens'], model_id, total_usage.get('poe_points', 0))}")
     console.print(f"  └ [green]output:[/green]  [yellow]{out_lines}[/yellow] lines, "
                   f"[yellow]{_format_size(out_size)}[/yellow]  "
                   f"→ [dim]{md_path}[/dim]  [dim]{elapsed:.1f}s[/dim]")
@@ -1495,7 +1548,7 @@ def enhance_interactive():
             console.print(f"\n🔧 Mode [bold]{mode}[/bold] — {MODES[mode]}")
             console.print(f"📊 Estimated tokens: [yellow bold]~{total_est:,}[/yellow bold]")
 
-            # Show cost range (only for OpenRouter — Poe uses subscription points)
+            # Show cost range
             if provider == "openrouter":
                 est_detail = estimate_tokens("x" * total_est * 4, mode)
                 costs = [estimate_cost(est_detail["prompt_tokens"], est_detail["completion_tokens"], m) for m in MODELS]
@@ -1503,7 +1556,12 @@ def enhance_interactive():
                     lo, hi = min(costs), max(costs)
                     console.print(f"💰 Estimated cost: [green]{format_cost(lo)}[/green] ~ [yellow]{format_cost(hi)}[/yellow]")
             else:
-                console.print(f"💰 Poe: uses subscription compute points")
+                # Poe: estimate messages (1 per file, +1 per 60K chars chunk)
+                est_msgs = sum(max(1, s["total_size"] // 60000 + 1) for s in selected_list)
+                pts_range = [POE_PRICING[bot] * est_msgs for bot in POE_MODELS if bot in POE_PRICING]
+                if pts_range:
+                    lo, hi = min(pts_range), max(pts_range)
+                    console.print(f"💰 Estimated: ~{est_msgs} msgs, [green]{lo:,}[/green] ~ [yellow]{hi:,}[/yellow] pts")
 
             step = 4
             continue
@@ -1511,7 +1569,8 @@ def enhance_interactive():
         # ── Step 4: Select model ─────────────────────────────────
         elif step == 4:
             if provider == "poe":
-                result = select_poe_model()
+                est_msgs = sum(max(1, s["total_size"] // 60000 + 1) for s in selected_list)
+                result = select_poe_model(est_messages=est_msgs)
             else:
                 # Calculate token estimates for cost display
                 est_key_2 = f"est_tokens_{mode}"
@@ -1533,7 +1592,10 @@ def enhance_interactive():
                 est_cost = estimate_cost(est_detail_2["prompt_tokens"], est_detail_2["completion_tokens"], model_id)
                 console.print(f"  🤖 [cyan]{model_name}[/cyan]  💰 ~[yellow]{format_cost(est_cost)}[/yellow]")
             else:
-                console.print(f"  🤖 [cyan]{model_name}[/cyan]  (Poe)")
+                pts = _poe_points(model_id)
+                est_total_pts = pts * est_msgs if pts else 0
+                pts_str = f"  💰 ~{est_total_pts:,} pts" if est_total_pts else ""
+                console.print(f"  🤖 [cyan]{model_name}[/cyan]{pts_str}")
 
             step = 5
             continue
