@@ -10,6 +10,9 @@ if errorlevel 1 (
     exit /b 1
 )
 
+REM Upgrade pip first
+.venv\Scripts\pip install --upgrade pip
+
 REM Install dependencies
 .venv\Scripts\pip install -r requirements.txt
 if errorlevel 1 (
